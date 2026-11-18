@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -u
+	dir="${XDG_RUNTIME_DIR:-/tmp}/raven-clipboard"
+tab=$(printf '\t')
+
+entry() {
+	cliphist list | while IFS= read -r found; do
+		if [ "${found%%"$tab"*}" = "$1" ]; then
+			printf '%s\n' "$found"
+			break
+		fi
+	done
+}
+
+copy() {
+	local found
+	found=$(entry "$1")
+	if [ -z "$found" ]; then
+		echo "raven-clipboard: no copy $1" >&2
+		exit 1
+	fi
+	if [ -n "$2" ]; then
+		printf '%s\n' "$found" | cliphist decode | wl-copy --type "$2"
+	else
+		printf '%s\n' "$found" | cliphist decode | wl-copy
+	fi
+}
+
+keys() {
+	local mods answer
+	case "${1:-}" in
+		paste) mods=SHIFT ;;
+		copy) mods=CTRL ;;
+		*)
+			echo "usage: raven-clipboard keys paste|copy" >&2
+			return 2
+			;;
+	esac
+	answer=$(hyprctl dispatch "hl.dsp.send_shortcut({ mods = \"$mods\", key = \"Insert\" })" 2>&1)
+	if [ "$answer" = ok ]; then
+		return 0
+	fi
+	echo "raven-clipboard: Hyprland said \"$answer\"; typing $mods + Insert with wtype" >&2
+	if ! wtype -M "${mods,,}" -k Insert -m "${mods,,}"; then
+		echo "raven-clipboard: $mods + Insert could not be typed" >&2
+		return 1
+	fi
+}
+
+case "${1:-}" in
+	store)
+		if [ "${CLIPBOARD_STATE:-data}" != data ]; then
+			cat > /dev/null
+			exit 0
+		fi
+		# History size: Preferences > System (settings.json); 0 keeps no history.
+		max=$(jq -r '.clipboard // 8' "$HOME/.config/raven/settings.json" 2> /dev/null || echo 8)
+		case "$max" in '' | *[!0-9]*) max=8 ;; esac
+		if [ "$max" = 0 ]; then
+			cat > /dev/null
+			exit 0
+		fi
+		types=$(wl-paste --list-types 2> /dev/null || true)
+		picture=""
+		if ! printf '%s\n' "$types" | grep -q '^text/plain'; then
+			picture=$(printf '%s\n' "$types" | grep -m 1 '^image/' || true)
+		fi
+		if [ -n "$picture" ]; then
+			cat > /dev/null
+			wl-paste --no-newline --type "$picture" | cliphist -max-items "$max" store
+		else
+			exec cliphist -max-items "$max" store
+		fi
+		;;
+	list)
+		mkdir -p "$dir"
+		cliphist list | head -n "${2:-8}" > "$dir/list.new"
+		keep=" "
+		while IFS="$tab" read -r id preview; do
+			keep="$keep$id "
+			if [[ $preview =~ ^\[\[\ binary\ data\ .*\ ([a-z]+)(\ [0-9]+x[0-9]+)?\ \]\]$ ]]; then
+				file="$dir/$id.${BASH_REMATCH[1]}"
+				if [ ! -s "$file" ]; then
+					printf '%s\t%s\n' "$id" "$preview" | cliphist decode > "$file.part" 2> /dev/null \
+						&& mv "$file.part" "$file" || rm -f "$file.part"
+				fi
+			fi
+		done < "$dir/list.new"
+		for file in "$dir"/*.*; do
+			[ -e "$file" ] || continue
+			name=${file##*/}
+			case "$name" in list.new) continue ;; esac
+			case "$keep" in *" ${name%%.*} "*) ;; *) rm -f "$file" ;; esac
+		done
+		cat "$dir/list.new"
+		;;
+	copy)
+		copy "${2:?usage: raven-clipboard copy ID [TYPE]}" "${3:-}"
+		;;
+	paste)
+		copy "${2:?usage: raven-clipboard paste ID [TYPE]}" "${3:-}"
+		sleep 0.06
+		keys paste || exit 1
+		;;
+	keys)
+		keys "${2:-}" || exit $?
+		;;
+	delete)
+		entry "${2:?usage: raven-clipboard delete ID}" | cliphist delete
+		;;
+	wipe)
+		cliphist wipe
+		rm -rf "$dir"
+		;;
+	*)
+		echo "usage: raven-clipboard list [N] | copy ID [TYPE] | paste ID [TYPE] | keys paste|copy | delete ID | wipe" >&2
+		exit 2
+		;;
+esac

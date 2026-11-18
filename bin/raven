@@ -1,0 +1,158 @@
+#!/bin/sh
+# raven: the Kali stand-in for upstream NIHIL's `nihil` CLI.
+#
+#   sudo raven apply DRAFT.json   Preferences > Apply. Saves the draft as
+#                                 ~/.config/raven/settings.json and applies what
+#                                 has a Kali equivalent (name, hostname, time
+#                                 zone, keyboard, locale, ssh, screens). Runs in
+#                                 the background; progress in /run/raven/apply.*
+#                                 (status: running | done | warning | failed).
+#
+# Exit codes the shell understands: 1 auth/not root, 2 invalid draft, 3 busy.
+# update / generations rebuild NixOS upstream and have no Kali equivalent.
+
+set -u
+
+die() { echo "raven: $1" >&2; exit "${2:-1}"; }
+
+[ "${1:-}" = apply ] || die "'$*' is a NixOS-only feature (not available on Kali)"
+[ "$(id -u)" = 0 ] || die "apply needs root (run through sudo)" 1
+draft="${2:-}"
+[ -r "$draft" ] || die "no draft file" 2
+jq -e 'type == "object"' "$draft" > /dev/null 2>&1 || die "draft is not a JSON object" 2
+
+user="${SUDO_USER:-}"
+[ -n "$user" ] && [ "$user" != root ] || die "run through sudo from your own user" 1
+uid=$(id -u "$user")
+home=$(getent passwd "$user" | cut -d: -f6)
+[ -d "$home" ] || die "no home for $user" 2
+
+run=/run/raven
+mkdir -p "$run" && chmod 755 "$run"
+exec 9> "$run/apply.lock"
+flock -n 9 || die "another apply is running" 3
+
+# Keep a private copy: the draft lives in the user's runtime dir.
+data=$(mktemp) || exit 2
+cat "$draft" > "$data"
+
+printf 'settings\n' > "$run/apply.kind"
+: > "$run/apply.log"
+printf 'running\n' > "$run/apply.status"
+chmod 644 "$run/apply.kind" "$run/apply.log" "$run/apply.status"
+
+work() {
+	log() { printf '%s\n' "$*" >> "$run/apply.log"; }
+	warned=0
+	warn() { log "error: $*"; warned=1; }
+	get() { jq -r "$1 // empty" "$data"; }
+	asuser() { runuser -u "$user" -- env HOME="$home" XDG_RUNTIME_DIR="/run/user/$uid" "$@"; }
+
+	# Full name (GECOS field 1)
+	full=$(get '.user.fullName')
+	if [ -n "$full" ] || jq -e '.user | has("fullName")' "$data" > /dev/null 2>&1; then
+		now=$(getent passwd "$user" | cut -d: -f5 | cut -d, -f1)
+		if [ "$full" != "$now" ]; then
+			case "$full" in
+			*[:,]* | *"
+"*) warn "name may not contain : or ," ;;
+			*) chfn -f "$full" "$user" > /dev/null 2>&1 && log "Name set to \"$full\"" || warn "could not set the name" ;;
+			esac
+		fi
+	fi
+
+	# Hostname
+	host=$(get '.host.name')
+	if [ -n "$host" ] && [ "$host" != "$(hostname)" ]; then
+		if printf '%s' "$host" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'; then
+			old=$(hostname)
+			if hostnamectl set-hostname "$host" 2> /dev/null; then
+				if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+					sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$host/" /etc/hosts
+				else
+					printf '127.0.1.1\t%s\n' "$host" >> /etc/hosts
+				fi
+				log "Hostname $old -> $host"
+			else
+				warn "could not set the hostname"
+			fi
+		else
+			warn "invalid hostname \"$host\" (letters, digits and -)"
+		fi
+	fi
+
+	# Time zone
+	tz=$(get '.timeZone')
+	if [ -n "$tz" ] && [ "$tz" != "$(timedatectl show -p Timezone --value 2> /dev/null)" ]; then
+		if timedatectl set-timezone "$tz" 2> /dev/null; then log "Time zone $tz"; else warn "unknown time zone $tz"; fi
+	fi
+
+	# Keyboard (system X11 keymap; Hyprland reads it from raven-settings.lua below)
+	layout=$(get '.keyboard.layout')
+	variant=$(get '.keyboard.variant')
+	if [ -n "$layout" ]; then
+		if printf '%s' "$layout$variant" | grep -Eq '^[A-Za-z0-9_,-]+$'; then
+			localectl set-x11-keymap "$layout" "" "$variant" 2> /dev/null || true
+			log "Keyboard $layout${variant:+ ($variant)}"
+		else
+			warn "invalid keyboard layout"
+			layout="" variant=""
+		fi
+	fi
+
+	# Locale
+	loc=$(get '.locale')
+	if [ -n "$loc" ] && [ "$loc" != "$(localectl status | sed -n 's/.*LANG=//p' | head -1)" ]; then
+		norm=$(printf '%s' "$loc" | tr 'A-Z' 'a-z' | sed 's/utf-8/utf8/')
+		if locale -a | tr 'A-Z' 'a-z' | grep -qx "$norm"; then
+			localectl set-locale "LANG=$loc" 2> /dev/null && log "Locale $loc (next login)" || warn "could not set the locale"
+		else
+			warn "locale $loc is not generated (sudo dpkg-reconfigure locales)"
+		fi
+	fi
+
+	# SSH server
+	ssh=$(jq -r 'if has("ssh") then .ssh else "" end' "$data")
+	if [ -n "$ssh" ] && systemctl cat ssh.service > /dev/null 2>&1; then
+		on=$(systemctl is-enabled ssh 2> /dev/null)
+		if [ "$ssh" = true ] && [ "$on" != enabled ]; then
+			systemctl enable --now ssh > /dev/null 2>&1 && log "SSH server on" || warn "could not start ssh"
+		elif [ "$ssh" = false ] && [ "$on" = enabled ]; then
+			systemctl disable --now ssh > /dev/null 2>&1 && log "SSH server off" || warn "could not stop ssh"
+		fi
+	fi
+
+	# Save settings.json (as the user, atomically)
+	if asuser sh -c 'mkdir -p "$1" && jq . > "$1/settings.json.new" && mv -f "$1/settings.json.new" "$1/settings.json"' \
+		sh "$home/.config/raven" < "$data"; then
+		log "Saved settings"
+	else
+		log "error: could not save settings.json"
+		printf 'failed\n' > "$run/apply.status"
+		return
+	fi
+
+	# Hyprland: keyboard + screens -> raven-settings.lua (dofile'd by hyprland.lua), then reload
+	lua=$(jq -r --arg layout "$layout" --arg variant "$variant" '
+		def s: tostring | gsub("[^A-Za-z0-9 _.,@:+-]"; "");
+		"-- Generated by `raven apply` from ~/.config/raven/settings.json. Do not edit.",
+		(if $layout != "" then "hl.config({ input = { kb_layout = \"\($layout)\", kb_variant = \"\($variant)\" } })" else empty end),
+		((.outputs // {}) | to_entries[] | select(.value | type == "object") |
+			"hl.monitor({ output = \"\(.key | s)\", mode = \"\(.value.mode // "preferred" | s)\", position = \"\(.value.position // "auto" | s)\", scale = \(.value.scale // 1 | tonumber? // 1), transform = \(.value.transform // 0 | tonumber? // 0) })")
+	' "$data")
+	if printf '%s\n' "$lua" | asuser sh -c 'cat > "$1.new" && mv -f "$1.new" "$1"' sh "$home/.config/hypr/raven-settings.lua"; then
+		asuser hyprctl reload > /dev/null 2>&1 || true
+	else
+		warn "could not write hypr/raven-settings.lua"
+	fi
+
+	for key in nilo deck fingerprint bootSound generations; do
+		jq -e --arg k "$key" 'has($k)' "$data" > /dev/null 2>&1 && log "($key is NixOS-only: saved, not applied)"
+	done
+	log "Done"
+	if [ "$warned" = 1 ]; then printf 'warning\n'; else printf 'done\n'; fi > "$run/apply.status"
+}
+
+# Detach: the shell polls /run/raven while this finishes.
+( work; rm -f "$data" ) > /dev/null 2>&1 &
+exit 0

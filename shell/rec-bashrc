@@ -1,0 +1,19 @@
+# RAVEN rec: rc file for the recorded shell (started by `script`). Your normal bash setup,
+# then the marker that makes Warp "Warpify" this nested shell (docs.warp.dev/terminal/warpify/subshells).
+[ -f ~/.bashrc ] && . ~/.bashrc
+if [ "${TERM_PROGRAM:-}" = WarpTerminal ]; then
+	# Warp types its setup script into this shell next. Bash's line editor echoes typed text
+	# (and prompts) on stderr, so stderr is parked on /dev/null until Warp reports it is
+	# bootstrapped; the first precmd after that (Warp keeps user precmd_functions) puts it back.
+	# Safety net: any prompt after 20s restores it too, even if Warp never takes over.
+	exec {__raven_rec_err}>&2 2>/dev/null
+	__raven_rec_unmute() {
+		[ -n "${__raven_rec_err:-}" ] || return 0
+		[ -n "${WARP_BOOTSTRAPPED:-}" ] || [ "$SECONDS" -gt 20 ] || return 0
+		exec 2>&"$__raven_rec_err" {__raven_rec_err}>&-
+		unset __raven_rec_err
+	}
+	precmd_functions=(__raven_rec_unmute "${precmd_functions[@]}")
+	PROMPT_COMMAND="__raven_rec_unmute; ${PROMPT_COMMAND:-}"
+	printf '\eP$f{"hook": "SourcedRcFileForWarp", "value": { "shell": "bash"}}\x9c'
+fi

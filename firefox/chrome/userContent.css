@@ -1,0 +1,38 @@
+/* RAVEN for Firefox: internal pages (new tab, home, about:*). Web pages are left alone. */
+
+@-moz-document url("about:newtab"), url("about:home"), url("about:privatebrowsing") {
+    :root {
+        --newtab-background-color: #000000 !important;
+        --newtab-background-color-secondary: #0E0E0E !important;
+        --newtab-text-primary-color: #F2F2F2 !important;
+        --newtab-text-secondary-color: #A3A3A3 !important;
+        --newtab-primary-action-background: #C6FF00 !important;
+        --newtab-element-hover-color: #1A1A1A !important;
+        --newtab-border-color: #2A2A2A !important;
+        --in-content-page-background: #000000 !important;
+    }
+    body { background-color: #000000 !important; font-family: "Space Grotesk", sans-serif !important; }
+    ::selection { background: #C6FF00 !important; color: #000000 !important; }
+}
+
+@-moz-document url-prefix("about:") {
+    :root {
+        --in-content-page-background: #000000 !important;
+        --in-content-box-background: #0E0E0E !important;
+        --in-content-border-color: #2A2A2A !important;
+        --in-content-text-color: #F2F2F2 !important;
+        --in-content-deemphasized-text: #A3A3A3 !important;
+        --in-content-primary-button-background: #C6FF00 !important;
+        --in-content-primary-button-background-hover: #D8FF4D !important;
+        --in-content-primary-button-background-active: #B3E600 !important;
+        --in-content-primary-button-text-color: #000000 !important;
+        --in-content-focus-outline-color: #C6FF00 !important;
+        --in-content-link-color: #C6FF00 !important;
+        --in-content-item-selected: #C6FF00 !important;
+        --in-content-item-selected-text: #000000 !important;
+        --color-accent-primary: #C6FF00 !important;
+        --color-accent-primary-hover: #D8FF4D !important;
+        --color-accent-primary-active: #B3E600 !important;
+        --button-text-color-primary: #000000 !important;
+    }
+}

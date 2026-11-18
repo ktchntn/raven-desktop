@@ -1,0 +1,7 @@
+#!/bin/sh
+# Stands in for `uwsm` in the shell's logout button: works with or without uwsm.
+if [ "$1" = stop ] && command -v uwsm >/dev/null && uwsm check is-active >/dev/null 2>&1; then
+	exec uwsm stop
+fi
+[ "$1" = stop ] && exec hyprctl dispatch 'hl.dsp.exit()'
+exec uwsm "$@"

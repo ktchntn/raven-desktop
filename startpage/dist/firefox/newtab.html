@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>New Tab</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <div class="clock" id="clock"><span id="hm">--:--</span><span class="ampm" id="ampm"></span></div>
+    <div class="date" id="date"></div>
+  </header>
+
+  <form id="search" autocomplete="off">
+    <span class="engine" id="engine">google</span>
+    <input id="q" type="text" spellcheck="false" placeholder="search, a host or IP, or !edb !gtfo !ht …" aria-label="Search">
+    <kbd>↵</kbd>
+  </form>
+  <div class="bangs" id="bangs"></div>
+
+  <section class="groups" id="groups"></section>
+
+  <footer>nevermore</footer>
+</main>
+<script src="links.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+case "$1" in up) brightnessctl set +5% >/dev/null ;; down) brightnessctl set 5%- >/dev/null ;; esac
+br="$(brightnessctl -m | awk -F, '{gsub("%","",$4); print $4}')"
+exec raven-ipc osd brightness "$br" >/dev/null 2>&1

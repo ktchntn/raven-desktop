@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Screenshots go through Flameshot (config: ~/.config/flameshot/flameshot.ini).
+#   raven-shot region  -> interactive capture (select, annotate, copy/save)
+#   raven-shot screen  -> the focused monitor, copied and saved
+set -euo pipefail
+dir="$(xdg-user-dir PICTURES 2>/dev/null || true)"
+{ [ -z "$dir" ] || [ "$dir" = "$HOME" ]; } && dir="$HOME/Pictures"
+dir="$dir/Screenshots"; mkdir -p "$dir"
+case "${1:-region}" in
+	region) exec flameshot gui ;;
+	screen) exec flameshot screen --clipboard --path "$dir" ;;
+	*) echo "usage: raven-shot screen | region" >&2; exit 2 ;;
+esac

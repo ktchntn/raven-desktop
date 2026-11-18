@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""raven-rec: record terminal sessions into an engagement folder, with Warp's blocks intact.
+
+  rec [NAME]          record this terminal (bash inside `script`); `exit` or `rec stop` ends it
+  rec stop            (shell function) end this terminal's recording; the tab stays, unrecorded
+  rec stop PID|all    end recordings from outside (quick settings' Log list uses this)
+  rec use NAME        make NAME (a folder in ~/engagements) the active engagement
+  rec on | off        the Log switch: while on, NEW terminals start recorded (existing ones never);
+                      off also stops the recordings it started (manual `rec` ones keep going)
+  rec status [--json] active engagement, switch, running recordings
+  rec export [FILE]   (re)build transcripts: one raw recording, or all of the active engagement's
+  rec list            engagement folders
+
+Engagement for a recording, first match wins: NAME given, the current folder inside
+~/engagements/<name>/..., the active engagement; otherwise it refuses (never guesses).
+
+Files: ~/engagements/<name>/logs/raw/<date>_<time>_<tty>.{log,timing} (untouched recording,
+advanced timing) and ~/engagements/<name>/logs/<date>_<time>_<tty>.md (clean transcript, built
+when the recording ends: per command its time, folder, exit code and output; Warp's setup script
+and full-screen programs left out). Nothing is ever deleted.
+
+In Warp the recorded shell is "Warpified" through Warp's rc-file hook (rec-bashrc), so blocks,
+the input editor and completions keep working; Warp shows a `script` chip in the prompt.
+State: ~/.local/state/raven/engagement, ~/.local/state/raven/rec-auto (switch on);
+running recordings: $XDG_RUNTIME_DIR/raven-rec/<pid>.json (for the bar's REC).
+"""
+import binascii
+import datetime
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+ROOT = os.path.join(HOME, "engagements")
+STATE = os.path.join(HOME, ".local", "state", "raven")
+ACTIVE = os.path.join(STATE, "engagement")
+AUTO = os.path.join(STATE, "rec-auto")
+RUN = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "raven-rec")
+RCFILE = os.path.join(HOME, ".local", "share", "raven", "rec-bashrc")
+LIME, DIM, RESET = "\033[38;2;198;255;0m", "\033[38;2;122;122;122m", "\033[0m"
+
+
+def short(path):
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + "/") else path
+
+
+def engagements():
+    try:
+        return sorted(d for d in os.listdir(ROOT) if os.path.isdir(os.path.join(ROOT, d)) and not d.startswith("."))
+    except OSError:
+        return []
+
+
+def active():
+    try:
+        name = open(ACTIVE).read().strip()
+    except OSError:
+        return ""
+    return name if name in engagements() else ""
+
+
+def note(*parts):
+    """One line per action in $XDG_RUNTIME_DIR/raven-rec.log (switch, picker, start/stop)."""
+    try:
+        with open(os.path.join(os.path.dirname(RUN), "raven-rec.log"), "a") as f:
+            print(datetime.datetime.now().strftime("%H:%M:%S"), *parts, file=f)
+    except OSError:
+        pass
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def resolve(name=None):
+    """Engagement for a new recording: explicit, current folder, active; else None."""
+    if name:
+        return name if name in engagements() else None
+    cwd = os.getcwd()
+    if cwd.startswith(ROOT + "/"):
+        first = cwd[len(ROOT) + 1:].split("/")[0]
+        if first in engagements():
+            return first
+    return active() or None
+
+
+def running():
+    found = []
+    try:
+        names = os.listdir(RUN)
+    except OSError:
+        return found
+    for n in names:
+        if not n.endswith(".json"):                   # <pid>.stop markers are not registry entries
+            continue
+        path = os.path.join(RUN, n)
+        try:
+            info = json.load(open(path))
+            os.kill(int(info["pid"]), 0)
+            found.append(info)
+        except (OSError, ValueError, KeyError):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return sorted(found, key=lambda i: i.get("started", ""))
+
+
+# ---------------------------------------------------------------- transcripts
+
+DCS = re.compile(rb"\x1bP\$([a-z])(.*?)(?:\x9c|\x1b\\)", re.S)
+ALT_ON = re.compile(rb"\x1b\[\?(?:1049|1047|47)h")
+ALT_OFF = re.compile(rb"\x1b\[\?(?:1049|1047|47)l")
+ESCAPES = [
+    re.compile(rb"\x1bP.*?(?:\x9c|\x1b\\)", re.S),          # DCS (Warp hooks and others)
+    re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"),      # OSC (titles, links)
+    re.compile(rb"\x1b\[[0-9;?<=>]*[ -/]*[@-~]"),            # CSI (colours, cursor)
+    re.compile(rb"\x1b[()*+][0-9A-Za-z]"),                  # charset
+    re.compile(rb"\x1b[@-Z\\-_=>78]"),                       # other two-byte escapes
+]
+
+
+def text_of(raw):
+    """Terminal output -> plain text: full-screen programs summarised, escapes removed, \\r and
+    backspaces applied the way a terminal would."""
+    parts, pos = [], 0
+    for on in ALT_ON.finditer(raw):
+        if on.start() < pos:
+            continue
+        parts.append(raw[pos:on.start()])
+        off = ALT_OFF.search(raw, on.end())
+        parts.append(b"\n[full-screen program: not recorded as text]\n")
+        pos = off.end() if off else len(raw)
+    parts.append(raw[pos:])
+    data = b"".join(parts)
+    data = re.sub(rb"\x1b\[0?K", b"\x1d", data)      # erase to end of line \
+    data = re.sub(rb"\x1b\[1K", b"\x1f", data)       # erase to start of line  > applied below
+    data = re.sub(rb"\x1b\[2K", b"\x1e", data)       # erase whole line       /
+    for pattern in ESCAPES:
+        data = pattern.sub(b"", data)
+    out = []
+    for line in data.decode("utf-8", "replace").replace("\r\n", "\n").split("\n"):
+        cells = []
+        col = 0
+        for ch in line:
+            if ch == "\r":
+                col = 0
+            elif ch == "\b":
+                col = max(0, col - 1)
+            elif ch == "\x1d":
+                del cells[col:]
+            elif ch == "\x1e":
+                cells = []
+            elif ch == "\x1f":
+                cells[:col] = [" "] * min(col, len(cells))
+            elif ch == "\x07" or (ord(ch) < 32 and ch != "\t"):
+                continue
+            else:
+                if col < len(cells):
+                    cells[col] = ch
+                else:
+                    cells.append(ch)
+                col += 1
+        out.append("".join(cells).rstrip())
+    while out and not out[-1]:
+        out.pop()
+    while out and not out[0]:
+        out.pop(0)
+    return "\n".join(out)
+
+
+def timeline(timing_path):
+    """[(byte offset, seconds since start)] and the start datetime, from an advanced timing log."""
+    start, points, offset, t = None, [], 0, 0.0
+    try:
+        lines = open(timing_path, errors="replace").read().splitlines()
+    except OSError:
+        return None, points
+    for line in lines:
+        parts = line.split(" ", 3)
+        if len(parts) >= 3 and parts[0] == "H" and parts[2] == "START_TIME" and len(parts) == 4:
+            try:
+                start = datetime.datetime.strptime(parts[3].strip(), "%Y-%m-%d %H:%M:%S%z")
+            except ValueError:
+                pass
+        elif len(parts) >= 3 and parts[0] == "O":
+            try:
+                t += float(parts[1])
+                offset += int(parts[2])
+            except ValueError:
+                continue
+            points.append((offset, t))
+    return start, points
+
+
+def time_at(start, points, offset):
+    if not start:
+        return None
+    seconds = 0.0
+    for end, t in points:
+        seconds = t
+        if end > offset:
+            break
+    return start + datetime.timedelta(seconds=seconds)
+
+
+def hooks(raw):
+    for m in DCS.finditer(raw):
+        try:
+            data = json.loads(binascii.unhexlify(m.group(2).strip()))
+        except (ValueError, binascii.Error):
+            continue
+        if isinstance(data, dict):
+            yield m.start(), m.end(), data.get("hook", ""), data.get("value") or {}
+
+
+def transcript(log_path):
+    raw = open(log_path, "rb").read()
+    head, _, body = raw.partition(b"\n")              # "Script started on ..." line
+    if not head.startswith(b"Script started"):
+        body = raw
+    tail = body.rfind(b"\nScript done on ")
+    if tail >= 0:
+        body = body[:tail]
+    start, points = timeline(log_path[:-len(".log")] + ".timing")
+    name = os.path.basename(log_path)[:-len(".log")]
+    engagement = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(log_path))))
+    title = f"# {engagement} · {start.strftime('%Y-%m-%d %H:%M') if start else name}"
+    lines = [title, "", f"Recorded with raven-rec · raw: `raw/{name}.log`", ""]
+
+    events = list(hooks(body))
+    if not events:                                    # not Warp: the whole session as text
+        text = text_of(body)
+        lines += ["```console", text, "```", ""] if text else ["(nothing recorded)", ""]
+        return "\n".join(lines)
+
+    boot = next((e for e in events if e[2] == "Bootstrapped"), None)
+    pwd, current = HOME, None
+    count = 0
+    prev_end = 0
+    for begin, end, hook, value in events:
+        since, prev_end = prev_end, end
+        if boot and begin < boot[0]:
+            continue
+        if hook == "Precmd":
+            pwd = value.get("pwd") or pwd
+        elif hook == "Preexec":
+            # Warp reports the command after alias expansion (ls -> ls --color=auto); the shell's
+            # echo of the line just before Preexec is what was actually typed, so prefer that.
+            typed = text_of(body[since:begin]).strip("\n")
+            current = (typed or value.get("command", ""), end, begin)
+        elif hook == "CommandFinished" and current:
+            command, out_start, at = current
+            output = text_of(body[out_start:begin])
+            when = time_at(start, points, at)
+            code = value.get("exit_code", "?")
+            stamp = when.strftime("%H:%M:%S") if when else "--:--:--"
+            lines += [f"## {stamp} · {short(pwd)} · exit {code}", "", "```console", f"$ {command}"]
+            if output:
+                lines.append(output)
+            lines += ["```", ""]
+            count += 1
+            current = None
+    if current and current[0].strip() in ("rec stop", "exit", "logout"):
+        current = None                                # what ended the recording, not part of it
+    if current:                                       # still running when the log was read
+        command, out_start, at = current
+        when = time_at(start, points, at)
+        stamp = when.strftime("%H:%M:%S") if when else "--:--:--"
+        lines += [f"## {stamp} · {short(pwd)} · still running", "", "```console", f"$ {command}",
+                  text_of(body[out_start:]), "```", ""]
+        count += 1
+    if count == 0:
+        lines += ["(no commands recorded)", ""]
+    return "\n".join(lines)
+
+
+def export(log_path):
+    md = os.path.join(os.path.dirname(os.path.dirname(log_path)), os.path.basename(log_path)[:-len(".log")] + ".md")
+    write(md, transcript(log_path))
+    return md
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_start(args):
+    auto = "--auto" in args
+    args = [a for a in args if a != "--auto"]
+    if os.environ.get("RAVEN_REC"):
+        print("rec: this terminal is already being recorded", file=sys.stderr)
+        return 1
+    name = resolve(args[0] if args else None)
+    if not name:
+        have = engagements()
+        if args:
+            print(f"rec: no engagement folder ~/engagements/{args[0]}", file=sys.stderr)
+        else:
+            print("rec: no engagement chosen. Run it inside ~/engagements/<name>/..., or", file=sys.stderr)
+            print("     `rec NAME` / `rec use NAME` (or pick one in quick settings > Log).", file=sys.stderr)
+        print("     engagements: " + (", ".join(have) if have else "(none: make a folder in ~/engagements)"),
+              file=sys.stderr)
+        return 1
+    raw_dir = os.path.join(ROOT, name, "logs", "raw")
+    os.makedirs(raw_dir, mode=0o700, exist_ok=True)
+    os.chmod(os.path.join(ROOT, name, "logs"), 0o700)
+    tty = (os.ttyname(0) if os.isatty(0) else "notty").replace("/dev/", "").replace("/", "")
+    stem = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_" + tty
+    log, timing = os.path.join(raw_dir, stem + ".log"), os.path.join(raw_dir, stem + ".timing")
+    os.makedirs(RUN, exist_ok=True)
+    info = {"pid": os.getpid(), "engagement": name, "log": log, "tty": tty, "auto": auto,
+            "started": datetime.datetime.now().isoformat(timespec="seconds")}
+    reg = os.path.join(RUN, f"{os.getpid()}.json")
+    write(reg, json.dumps(info))
+    note("start", name, tty, "auto" if auto else "manual", "pid", os.getpid())
+    how = "`rec stop` ends it, exit closes the tab" if auto else "`exit` or `rec stop` to end"
+    print(f"{LIME}● REC{RESET} {name} → {short(os.path.join(ROOT, name, 'logs'))}/{stem}.md {DIM}({how}){RESET}")
+    env = dict(os.environ, RAVEN_REC=log, RAVEN_REC_ENGAGEMENT=name, RAVEN_REC_PID=str(os.getpid()))
+    stop_marker = os.path.join(RUN, f"{os.getpid()}.stop")
+    child = None
+
+    def ended(signum, frame):                         # tab closed (SIGHUP) or stopped: still export
+        if child and child.poll() is None:
+            child.terminate()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGHUP, ended)
+    signal.signal(signal.SIGTERM, ended)
+    code = 0
+    try:
+        child = subprocess.Popen(["script", "-q", "-f", "-m", "advanced", "-T", timing, "-O", log,
+                                  "-c", f"bash --rcfile {RCFILE} -i"], env=env)
+        info["child"] = child.pid
+        write(reg, json.dumps(info))
+        code = child.wait()
+    except SystemExit as e:
+        code = e.code
+    finally:
+        stopped = os.path.exists(stop_marker)
+        note("stop", name, tty, "stop" if stopped else "exit", code)
+        for path in (reg, stop_marker):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        try:
+            md = export(log)
+            msg = f"■ recording stopped · transcript: {short(md)}"
+        except Exception as e:                        # the recording itself is safe in raw/
+            msg = f"rec: transcript failed ({e}); the raw recording is in {short(log)}"
+    hung_up = code in (128 + signal.SIGHUP,)
+    if hung_up:
+        return code
+    if stopped or not auto:
+        print(f"{DIM}{msg}{RESET}")
+    if auto and stopped:
+        # The tab was started recorded (this process replaced its shell): carry on unrecorded.
+        os.execvpe("bash", ["bash", "-i"], dict(os.environ, RAVEN_REC_OFF="1"))
+    return code
+
+
+def cmd_stop(args):
+    target = args[0] if args else ""
+    if not target:
+        print("rec stop: inside a recorded terminal type `rec stop`; from elsewhere: rec stop PID|all",
+              file=sys.stderr)
+        return 1
+    stopped = stop_where(lambda r: target in ("all", str(r["pid"])))
+    print(f"stopped {stopped} recording(s)")
+    return 0 if stopped else 1
+
+
+def stop_where(match):
+    """Stop the matching recordings like `rec stop` in their tab: transcript written, tab stays open."""
+    stopped = 0
+    for r in running():
+        if not match(r):
+            continue
+        open(os.path.join(RUN, f"{r['pid']}.stop"), "w").close()
+        try:
+            os.kill(int(r.get("child") or r["pid"]), signal.SIGTERM)
+            stopped += 1
+        except (OSError, ValueError):
+            pass
+    return stopped
+
+
+def cmd_use(args):
+    if not args or args[0] not in engagements():
+        print("rec use NAME, one of: " + (", ".join(engagements()) or "(none)"), file=sys.stderr)
+        return 1
+    write(ACTIVE, args[0] + "\n")
+    note("use", args[0])
+    print(f"active engagement: {args[0]}")
+    return 0
+
+
+def cmd_switch(on):
+    if on:
+        if not active():
+            print("rec on: choose an engagement first (`rec use NAME` or quick settings > Log)", file=sys.stderr)
+            return 1
+        write(AUTO, "1\n")
+        note("switch on", active())
+        print(f"Log switch on: new terminals are recorded into {active()} (open ones are not)")
+    else:
+        try:
+            os.remove(AUTO)
+        except OSError:
+            pass
+        stopped = stop_where(lambda r: r.get("auto"))
+        note("switch off", f"stopped {stopped} auto")
+        print("Log switch off: new terminals are not recorded"
+              + (f"; stopped {stopped} auto-started recording(s)" if stopped else ""))
+    return 0
+
+
+def cmd_status(args):
+    state = {"engagement": active(), "auto": os.path.exists(AUTO), "engagements": engagements(),
+             "recording": running()}
+    if "--json" in args:
+        print(json.dumps(state))
+        return 0
+    print(f"engagement: {state['engagement'] or '(none)'} · switch: {'on' if state['auto'] else 'off'}")
+    for r in state["recording"]:
+        kind = "auto" if r.get("auto") else "manual"
+        print(f"  ● {r['engagement']}  pid {r['pid']}  {kind}  since {r['started'][11:16]}  {short(r['log'])}")
+    if not state["recording"]:
+        print("  no terminal is being recorded")
+    return 0
+
+
+def cmd_export(args):
+    logs = []
+    if args:
+        logs = [os.path.abspath(os.path.expanduser(args[0]))]
+    else:
+        name = os.environ.get("RAVEN_REC_ENGAGEMENT") or resolve()
+        if not name:
+            print("rec export: no engagement (rec use NAME)", file=sys.stderr)
+            return 1
+        raw = os.path.join(ROOT, name, "logs", "raw")
+        logs = sorted(os.path.join(raw, f) for f in os.listdir(raw) if f.endswith(".log")) if os.path.isdir(raw) else []
+    for log in logs:
+        print(short(export(log)))
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "start"
+    rest = args[1:]
+    if cmd in ("start",):
+        return cmd_start(rest)
+    if cmd == "stop":
+        return cmd_stop(rest)
+    if cmd == "use":
+        return cmd_use(rest)
+    if cmd in ("on", "off"):
+        return cmd_switch(cmd == "on")
+    if cmd == "status":
+        return cmd_status(rest)
+    if cmd == "export":
+        return cmd_export(rest)
+    if cmd == "list":
+        print("\n".join(engagements()))
+        return 0
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    if not cmd.startswith("-"):                       # `rec OSCP-B`
+        return cmd_start(args)
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

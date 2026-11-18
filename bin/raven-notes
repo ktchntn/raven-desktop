@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""raven-notes: the RAVEN shell's quick notes (⌘⌥N), kept in Obsidian's daily notes.
+
+Each note goes under "## Captured" in today's daily note of the vault, as
+    - h:mm AM/PM  TEXT
+The vault, daily-note folder and file-name format come from Obsidian itself
+(~/.config/obsidian/obsidian.json, <vault>/.obsidian/daily-notes.json). A missing daily note is
+created with the same layout as the vault's Templates/Daily.md (Captured / Today / Links).
+
+  raven-notes list [N]                 the newest N notes across recent daily notes, as JSON
+  raven-notes add TEXT                 add a note to today's daily note
+  raven-notes edit KEY OLD TEXT        replace the note at KEY (must still read OLD), keeping its time
+  raven-notes delete KEY OLD           remove the note at KEY (must still read OLD)
+
+KEY is "<daily note name>:<line>" (from `list`). Every command prints the updated list. Nothing is
+lost: deleted notes and the old text of edited ones go to ~/Notes/.deleted.md. Writes are atomic.
+RAVEN_NOTES_VAULT=/path overrides the vault.
+"""
+import datetime
+import glob
+import json
+import os
+import re
+import sys
+import tempfile
+
+HOME = os.path.expanduser("~")
+KEPT = os.path.join(HOME, "Notes", ".deleted.md")
+HEADING = "## Captured"
+# "- 5:52 PM  text" (also reads 24-hour "- 17:52  text" from before)
+ITEM = re.compile(r"^- (?:(\d{1,2}:\d\d(?: [AP]M)?)  )?(.*\S.*)$")
+SHOW = 8
+SCAN_DAYS = 60
+
+
+def vault():
+    if os.environ.get("RAVEN_NOTES_VAULT"):
+        return os.path.expanduser(os.environ["RAVEN_NOTES_VAULT"])
+    try:
+        vaults = json.load(open(os.path.join(HOME, ".config/obsidian/obsidian.json"))).get("vaults", {})
+        live = [v for v in vaults.values() if os.path.isdir(v.get("path", ""))]
+        live.sort(key=lambda v: (not v.get("open"), -v.get("ts", 0)))
+        if live:
+            return live[0]["path"]
+    except (OSError, ValueError):
+        pass
+    return os.path.join(HOME, "Raven")
+
+
+VAULT = vault()
+
+
+def daily_settings():
+    try:
+        d = json.load(open(os.path.join(VAULT, ".obsidian", "daily-notes.json")))
+    except (OSError, ValueError):
+        d = {}
+    return d.get("folder") or "", d.get("format") or "YYYY-MM-DD"
+
+
+FOLDER, FORMAT = daily_settings()
+
+
+def name_for(day):
+    """Obsidian's moment.js format, for the tokens a daily-note name realistically uses."""
+    out = FORMAT
+    for token, value in (("YYYY", f"{day.year:04d}"), ("MM", f"{day.month:02d}"), ("DD", f"{day.day:02d}")):
+        out = out.replace(token, value)
+    return out
+
+
+def date_of(name):
+    rx = re.escape(FORMAT).replace("YYYY", r"(?P<y>\d{4})").replace("MM", r"(?P<m>\d\d)").replace("DD", r"(?P<d>\d\d)")
+    m = re.fullmatch(rx, name)
+    if not m:
+        return None
+    try:
+        return datetime.date(int(m.group("y")), int(m.group("m")), int(m.group("d")))
+    except (ValueError, IndexError):
+        return None
+
+
+def path_of(name):
+    return os.path.join(VAULT, FOLDER, name + ".md")
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        return None
+
+
+def touch_modified(lines):
+    """Set `modified:` in the note's front matter (if it has that property) to now."""
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return
+    end = lines.index("---", 1)
+    for i in range(1, end):
+        if lines[i].startswith("modified:"):
+            lines[i] = "modified: " + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
+            return
+
+
+def write(path, lines):
+    touch_modified(lines)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".raven-notes-", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("".join(line + "\n" for line in lines))
+    if os.path.exists(path):
+        os.chmod(tmp, os.stat(path).st_mode & 0o777)
+    os.replace(tmp, path)
+
+
+def keep(why, where, line):
+    os.makedirs(os.path.dirname(KEPT), exist_ok=True)
+    with open(KEPT, "a", encoding="utf-8") as f:
+        f.write(f"<!-- {why} {datetime.datetime.now():%Y-%m-%d %H:%M} ({where}) -->\n{line}\n")
+
+
+def section(lines):
+    """(start, end) line indexes of the Captured section's body, or None."""
+    for i, line in enumerate(lines):
+        if line.strip() == HEADING:
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith("#"):
+                    end = j
+                    break
+            return i + 1, end
+    return None
+
+
+def new_note(day):
+    stamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
+    return ["---", f"date: {day:%Y-%m-%d}", f"created: {stamp}", f"modified: {stamp}", "---",
+            HEADING, "", "## Today", "- ", "",
+            "## Links",
+            f"← [[{name_for(day - datetime.timedelta(days=1))}]] · [[{name_for(day + datetime.timedelta(days=1))}]] →"]
+
+
+def add(text):
+    now = datetime.datetime.now()
+    day = now.date()
+    path = path_of(name_for(day))
+    lines = read(path)
+    if lines is None or not any(l.strip() for l in lines):
+        lines = new_note(day)
+    span = section(lines)
+    if span is None:                                   # a daily note without the heading: add it on top
+        at = 0
+        if lines and lines[0] == "---" and "---" in lines[1:]:
+            at = lines.index("---", 1) + 1
+        lines[at:at] = [HEADING, ""]
+        span = section(lines)
+    start, end = span
+    body = lines[start:end]
+    # the template's empty "- " bullet (where Templater put the cursor) is taken over
+    for k, line in enumerate(body):
+        if line.strip() in ("-", "- "):
+            del body[k]
+            break
+    while body and not body[-1].strip():
+        body.pop()
+    body.append(f"- {now:%-I:%M %p}  {text}")
+    body.append("")
+    lines[start:end] = body
+    write(path, lines)
+
+
+def listing(count=SHOW):
+    out = []
+    files = []
+    for path in glob.glob(os.path.join(VAULT, FOLDER, "*.md")):
+        day = date_of(os.path.basename(path)[:-3])
+        if day:
+            files.append((day, path))
+    files.sort(reverse=True)
+    for day, path in files[:SCAN_DAYS]:
+        lines = read(path) or []
+        span = section(lines)
+        if not span:
+            continue
+        for i in range(span[1] - 1, span[0] - 1, -1):
+            m = ITEM.match(lines[i])
+            if not m:
+                continue
+            stamp = f"{day:%Y-%m-%d}" + (f" {m.group(1)}" if m.group(1) else "")
+            out.append({"n": f"{os.path.basename(path)[:-3]}:{i + 1}", "line": lines[i],
+                        "stamp": stamp, "body": m.group(2)})
+            if len(out) >= count:
+                return out
+    return out
+
+
+def locate(key, old):
+    name, _, num = key.rpartition(":")
+    path = path_of(name)
+    lines = read(path)
+    try:
+        n = int(num)
+    except ValueError:
+        n = 0
+    if lines is None or not (1 <= n <= len(lines)) or lines[n - 1] != old:
+        print(json.dumps({"error": "changed", "notes": listing()}))
+        sys.exit(2)
+    return path, lines, n, name
+
+
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "list"
+    if cmd == "list":
+        print(json.dumps({"notes": listing(int(args[1]) if len(args) > 1 else SHOW)}))
+        return
+    if cmd == "add" and len(args) == 2:
+        text = " ".join(args[1].split("\n")).strip()
+        if text:
+            add(text)
+    elif cmd == "edit" and len(args) == 4:
+        path, lines, n, name = locate(args[1], args[2])
+        text = " ".join(args[3].split("\n")).strip()
+        m = ITEM.match(args[2])
+        if text and m and text != m.group(2):
+            keep("edited, was", name, args[2])
+            lines[n - 1] = f"- {m.group(1)}  {text}" if m.group(1) else f"- {text}"
+            write(path, lines)
+    elif cmd == "delete" and len(args) == 3:
+        path, lines, n, name = locate(args[1], args[2])
+        keep("deleted", name, args[2])
+        del lines[n - 1]
+        write(path, lines)
+    else:
+        print(__doc__, file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"notes": listing()}))
+
+
+if __name__ == "__main__":
+    main()

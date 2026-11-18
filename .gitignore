@@ -1,0 +1,16 @@
+# Built artifacts (rebuilt by vscode/pack.py)
+*.vsix
+__pycache__/
+*.pyc
+
+# Editor / OS clutter
+*~
+*.swp
+.DS_Store
+
+# Personal, never committed
+env.local
+
+# Kali-logo wallpapers: OffSec trademark, kept locally only
+wallpapers/black-kali.png
+wallpapers/white-kali.png

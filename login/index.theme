@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=RAVEN
+Comment=RAVEN login screen (adw-gtk3-dark + RAVEN colours)
+
+[X-GNOME-Metatheme]
+GtkTheme=RAVEN

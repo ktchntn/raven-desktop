@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""raven-done: "this long command just finished" notification (called by the shell hook in
+~/.config/raven/prompt.bash, for commands that ran 30 s or more).
+
+  raven-done CODE SECONDS COMMAND PWD SHELL_PID
+
+Skipped: commands you were sitting in anyway (ssh, editors, pagers, listeners, consoles...) and
+anything you stopped with Ctrl-C (exit 130). The notification's "Show" button focuses the
+terminal window the command ran in (found by walking up from SHELL_PID to a Hyprland window).
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+# First word of the command (after sudo/env/time/proxychains) -> no alert: interactive or
+# long-running by design, so its end isn't news.
+QUIET = re.compile(r"^(ssh|scp|sftp|mosh|vi|vim|nvim|nano|micro|emacs|less|more|most|man|info|"
+                   r"top|htop|btop|watch|tail|journalctl|nc|ncat|netcat|socat|rlwrap|pwncat.*|"
+                   r"msfconsole|msfdb|evil-winrm|smbclient|rpcclient|mysql|mariadb|psql|sqlite3|"
+                   r"ftp|telnet|tmux|screen|claude|bash|sh|zsh|fish|su|xfreerdp3?|rdesktop|"
+                   r"responder|tcpdump|tshark|wireshark|burpsuite|bloodhound|neo4j|ligolo.*|"
+                   r"chisel|python3? -m http\.server|php -S|updog|rec|raven-rec|fg|wait|sleep)$")
+PREFIX = {"sudo", "env", "time", "nice", "nohup", "proxychains", "proxychains4", "stdbuf"}
+
+
+def first_word(command):
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    while words and (words[0] in PREFIX or words[0].startswith("-") or "=" in words[0]):
+        words = words[1:]
+    if not words:
+        return ""
+    name = os.path.basename(words[0])
+    if name.startswith("python") and words[1:3] == ["-m", "http.server"]:
+        return "python3 -m http.server"
+    return name
+
+
+def duration(secs):
+    h, rest = divmod(secs, 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def window_of(pid):
+    """Hyprland address of the window whose process is pid or one of its ancestors."""
+    try:
+        clients = json.loads(subprocess.run(["hyprctl", "clients", "-j"], capture_output=True,
+                                            text=True, timeout=3).stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+    by_pid = {c.get("pid"): c.get("address") for c in clients}
+    seen = 0
+    while pid > 1 and seen < 40:
+        if pid in by_pid:
+            return by_pid[pid]
+        try:
+            stat = open(f"/proc/{pid}/stat").read()
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return ""
+        seen += 1
+    return ""
+
+
+def main():
+    if len(sys.argv) != 6:
+        sys.exit(__doc__)
+    code, secs, command, pwd, shell_pid = sys.argv[1:]
+    code, secs = int(code), int(secs)
+    name = first_word(command)
+    if code == 130 or not name or QUIET.match(name):
+        return
+    where = pwd.replace(os.path.expanduser("~"), "~", 1)
+    title = f"{name} finished" if code == 0 else f"{name} failed · exit {code}"
+    short = command if len(command) <= 90 else command[:87] + "…"
+    body = f"{duration(secs)} · {where}\n{short}"
+    address = window_of(int(shell_pid))
+    args = ["notify-send", "--urgency=normal", "--app-name=Terminal", "--hint=string:x-raven-tag:done"]
+    if address:
+        args.append("--action=show=Show")
+    picked = subprocess.run(args + [title, body], capture_output=True, text=True).stdout.strip()
+    if picked == "show" and address:
+        subprocess.run(["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{address}" }})'],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+[Desktop Entry]
+# RAVEN: Kali's code-oss package ships no launcher entry, so this adds one.
+Type=Application
+Name=VS Code
+GenericName=Code editor
+Comment=Code - OSS, the open-source build of Visual Studio Code
+Exec=/usr/bin/code-oss %F
+Icon=visual-studio-code
+Terminal=false
+StartupNotify=false
+StartupWMClass=Code - OSS
+Categories=Development;IDE;TextEditor;
+Keywords=vscode;code;code-oss;editor;ide;
+Actions=new-empty-window;
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Exec=/usr/bin/code-oss --new-window
+Icon=visual-studio-code

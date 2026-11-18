@@ -1,0 +1,142 @@
+/* RAVEN for Firefox (ESR 128): the browser's chrome in RAVEN's palette.
+   void 000000 · surface 0E0E0E · raised 1A1A1A · line 2A2A2A · off 333333
+   muted 7A7A7A · dim A3A3A3 · ink F2F2F2 · accent C6FF00 (black text on it) */
+
+:root, :root[lwtheme] {
+    --raven-void: #000000;
+    --raven-surface: #0E0E0E;
+    --raven-raised: #1A1A1A;
+    --raven-line: #2A2A2A;
+    --raven-muted: #7A7A7A;
+    --raven-dim: #A3A3A3;
+    --raven-ink: #F2F2F2;
+    --raven-accent: #C6FF00;
+
+    /* Frame and tab strip */
+    --lwt-accent-color: var(--raven-void) !important;
+    --lwt-accent-color-inactive: var(--raven-void) !important;
+    --lwt-text-color: var(--raven-dim) !important;
+    --lwt-tab-line-color: var(--raven-accent) !important;
+    --tab-selected-bgcolor: var(--raven-raised) !important;
+    --tab-selected-textcolor: var(--raven-ink) !important;
+    --tab-loading-fill: var(--raven-accent) !important;
+    --tab-attention-icon-color: var(--raven-accent) !important;
+    --tab-border-radius: 10px !important;
+
+    /* Toolbars */
+    --toolbar-bgcolor: var(--raven-void) !important;
+    --toolbar-color: var(--raven-ink) !important;
+    --toolbar-field-background-color: var(--raven-surface) !important;
+    --toolbar-field-color: var(--raven-ink) !important;
+    --toolbar-field-border-color: var(--raven-line) !important;
+    --toolbar-field-focus-background-color: var(--raven-surface) !important;
+    --toolbar-field-focus-color: var(--raven-ink) !important;
+    --toolbar-field-focus-border-color: var(--raven-accent) !important;
+    --toolbarbutton-icon-fill: var(--raven-dim) !important;
+    --toolbarbutton-icon-fill-attention: var(--raven-accent) !important;
+    --toolbarbutton-hover-background: var(--raven-raised) !important;
+    --toolbarbutton-active-background: var(--raven-line) !important;
+    --toolbarbutton-border-radius: 8px !important;
+    --chrome-content-separator-color: var(--raven-line) !important;
+    --toolbox-border-bottom-color: var(--raven-line) !important;
+    --focus-outline-color: var(--raven-accent) !important;
+
+    /* Panels, menus, popups */
+    --arrowpanel-background: var(--raven-surface) !important;
+    --arrowpanel-color: var(--raven-ink) !important;
+    --arrowpanel-border-color: var(--raven-line) !important;
+    --arrowpanel-dimmed: var(--raven-raised) !important;
+    --arrowpanel-dimmed-further: var(--raven-line) !important;
+    --panel-separator-color: var(--raven-line) !important;
+    --menu-background-color: var(--raven-surface) !important;
+    --menu-color: var(--raven-ink) !important;
+    --menu-border-color: var(--raven-line) !important;
+    --menuitem-hover-background-color: var(--raven-raised) !important;
+    --button-hover-bgcolor: var(--raven-raised) !important;
+    --button-active-bgcolor: var(--raven-line) !important;
+    --button-primary-bgcolor: var(--raven-accent) !important;
+    --button-primary-hover-bgcolor: #D8FF4D !important;
+    --button-primary-active-bgcolor: #B3E600 !important;
+    --button-primary-color: #000000 !important;
+    --color-accent-primary: var(--raven-accent) !important;
+    --color-accent-primary-hover: #D8FF4D !important;
+    --color-accent-primary-active: #B3E600 !important;
+    --checkbox-checked-bgcolor: var(--raven-accent) !important;
+    --checkbox-checked-color: #000000 !important;
+
+    /* Address bar results */
+    --urlbarView-highlight-background: var(--raven-accent) !important;
+    --urlbarView-highlight-color: #000000 !important;
+    --urlbarView-hover-background: var(--raven-raised) !important;
+    --urlbarView-separator-color: var(--raven-line) !important;
+    --urlbar-box-bgcolor: var(--raven-raised) !important;
+    --urlbar-box-hover-bgcolor: var(--raven-line) !important;
+    --urlbar-box-text-color: var(--raven-dim) !important;
+
+    /* Sidebar */
+    --sidebar-background-color: var(--raven-surface) !important;
+    --sidebar-text-color: var(--raven-ink) !important;
+    --sidebar-border-color: var(--raven-line) !important;
+
+    /* Text: Space Grotesk for the interface, Space Mono for labels and the address */
+    font-family: "Space Grotesk", sans-serif !important;
+}
+
+/* The selected tab: raised, with a lime line along its bottom edge. */
+.tab-background {
+    border: 1px solid transparent !important;
+}
+.tab-background:is([selected], [multiselected]) {
+    background: var(--raven-raised) !important;
+    border-color: var(--raven-line) !important;
+    box-shadow: inset 0 -2px 0 var(--raven-accent) !important;
+    outline: none !important;
+}
+.tabbrowser-tab:hover > .tab-stack > .tab-background:not([selected], [multiselected]) {
+    background: var(--raven-surface) !important;
+}
+.tab-label { font-family: "Space Grotesk", sans-serif !important; }
+.tabbrowser-tab:not([visuallyselected]) .tab-label { color: var(--raven-muted) !important; }
+.tab-throbber[busy]::before { fill: var(--raven-accent) !important; }
+
+/* Address bar: Space Mono, lime outline when focused. */
+#urlbar-input, .urlbarView-url, .urlbarView-title, #searchbar .searchbar-textbox {
+    font-family: "Space Mono", monospace !important;
+}
+#urlbar[focused] > #urlbar-background,
+#searchbar:focus-within {
+    outline: 1px solid var(--raven-accent) !important;
+    outline-offset: -1px !important;
+    box-shadow: none !important;
+}
+#urlbar-background { border-color: var(--raven-line) !important; }
+.urlbarView-row[selected] .urlbarView-url,
+.urlbarView-row[selected] .urlbarView-action,
+.urlbarView-row[selected] .urlbarView-title-separator::before { color: #000000 !important; }
+#identity-icon, #tracking-protection-icon-container image { fill: var(--raven-dim) !important; }
+
+/* One hairline under the toolbars, no shadows. */
+#navigator-toolbox {
+    border-bottom: 1px solid var(--raven-line) !important;
+    box-shadow: none !important;
+}
+#nav-bar { box-shadow: none !important; border-top: none !important; }
+
+/* Text selection in the chrome. */
+::selection { background: var(--raven-accent) !important; color: #000000 !important; }
+
+/* Context menus (native-styled on Linux). */
+menupopup, panel {
+    --panel-background: var(--raven-surface) !important;
+    --panel-color: var(--raven-ink) !important;
+    --panel-border-color: var(--raven-line) !important;
+}
+menupopup menuitem:hover, menupopup menu:hover,
+menupopup menuitem[_moz-menuactive], menupopup menu[_moz-menuactive] {
+    background-color: var(--raven-raised) !important;
+    color: var(--raven-ink) !important;
+}
+
+/* Extension pages (the RAVEN startpage): just the puzzle icon in the address bar, no
+   "Extension (RAVEN Start)" label. */
+#identity-box.extensionPage #identity-icon-label { display: none !important; }

@@ -1,0 +1,14 @@
+{
+  "name": "raven-theme",
+  "displayName": "RAVEN",
+  "description": "RAVEN: black, NIHIL's greys, and #C6FF00.",
+  "publisher": "raven",
+  "version": "1.0.0",
+  "engines": { "vscode": "^1.70.0" },
+  "categories": ["Themes"],
+  "contributes": {
+    "themes": [
+      { "label": "RAVEN", "uiTheme": "vs-dark", "path": "./themes/raven-color-theme.json" }
+    ]
+  }
+}

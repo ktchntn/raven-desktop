@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# raven-explain (SUPER + ALT + X): send the copied text to Huginn (Claude Code) with a
+# "what stands out, what would you try next" prompt. Text only; long copies are cut to 30 000
+# characters (the end is kept: tool output usually matters most at the end).
+set -u
+max=30000
+types=$(wl-paste --list-types 2>/dev/null || true)
+if ! printf '%s\n' "$types" | grep -q -E '^(text/plain|UTF8_STRING|STRING|TEXT)'; then
+	notify-send --app-name=Huginn "Nothing to explain" "Copy some text first (⌘C), then press ⌘⌥X."
+	exit 1
+fi
+text=$(wl-paste --no-newline --type text 2>/dev/null)
+if [ -z "${text//[[:space:]]/}" ]; then
+	notify-send --app-name=Huginn "Nothing to explain" "The clipboard is empty."
+	exit 1
+fi
+if [ "${#text}" -gt "$max" ]; then
+	text="[... first $(( ${#text} - max )) characters cut ...]
+${text: -$max}"
+fi
+exec qs -c raven ipc call nilo analyse "$text"

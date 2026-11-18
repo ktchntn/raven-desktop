@@ -1,0 +1,3 @@
+#!/bin/sh
+# Laptop mic-mute LED sync; nothing to do in a VM without one.
+exit 0

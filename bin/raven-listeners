@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""raven-listeners: the listening sockets you started, as JSON, for the RAVEN shell.
+
+Rules (to show engagement listeners, not system noise):
+  - TCP listening on a real address (0.0.0.0, ::, tun0, eth0...): always shown.
+  - TCP on loopback only: shown for tunnelling/pivoting tools (ssh -D, chisel, ligolo...).
+  - UDP: shown on fixed ports below the ephemeral range, minus DHCP/mDNS/NTP.
+Listeners started with sudo show without a process name (not readable without root).
+"""
+import json
+import re
+import subprocess
+
+PIVOT = re.compile(r"^(ssh|chisel.*|ligolo.*|proxy|socat|sshuttle|ncat|nc|nc\..*|netcat|"
+                   r"msfconsole|msfrpcd|ruby|sliver.*|python3?(\.\d+)?|gost|frpc|frps|rpivot.*)$")
+QUIET_UDP = {67, 68, 123, 546, 547, 5353, 1900}
+EPHEMERAL = 32768
+
+
+def parse(line):
+    cols = line.split()
+    if len(cols) < 5:
+        return None
+    proto, local = cols[0], cols[4]
+    rest = " ".join(cols[6:]) if len(cols) > 6 else ""
+    addr, _, port = local.rpartition(":")
+    addr = addr.strip("[]").split("%")[0]
+    try:
+        port = int(port)
+    except ValueError:
+        return None
+    m = re.search(r'users:\(\("([^"]+)",pid=(\d+)', rest)
+    proc, pid = (m.group(1), int(m.group(2))) if m else ("", 0)
+    return {"proto": proto, "addr": addr, "port": port, "proc": proc, "pid": pid}
+
+
+def wanted(s):
+    loop = s["addr"].startswith("127.") or s["addr"] == "::1"
+    if s["proto"] == "tcp":
+        return not loop or bool(PIVOT.match(s["proc"]))
+    if s["proto"] == "udp":
+        return not loop and s["port"] < EPHEMERAL and s["port"] not in QUIET_UDP
+    return False
+
+
+def main():
+    # One call with both -t and -u: ss only prints the protocol column when several are asked for.
+    out = subprocess.run(["ss", "-H", "-tulnp"], capture_output=True, text=True).stdout
+    seen, found = set(), []
+    for line in out.splitlines():
+        s = parse(line)
+        if not s or not wanted(s):
+            continue
+        if s["addr"] in ("0.0.0.0", "::", "*"):
+            s["addr"] = "all"
+        key = (s["proto"], s["port"], s["proc"])          # IPv4 + IPv6 twins -> one row
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(s)
+    found.sort(key=lambda s: (s["proto"] != "tcp", s["port"]))
+    print(json.dumps(found))
+
+
+if __name__ == "__main__":
+    main()

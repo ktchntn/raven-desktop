@@ -1,0 +1,1051 @@
+/*
+ * RAVEN for Obsidian — the RAVEN Hyprland shell's design language, not just its colours.
+ *
+ *  Rules taken from the shell (raven/qml, tokens.json):
+ *   - Void black surfaces, #0E0E0E raised panels, 1px #2A2A2A hairlines. No shadows, no gradients.
+ *   - "Active" is ink-filled (white, black glyph) like the quick-settings tiles; hover is #1A1A1A.
+ *   - Lime #C6FF00 only for live/focus details: caret, links' underline, the active-item dot, CTAs,
+ *     the status dot, done tasks. Never as a surface tint.
+ *   - Type: Doto (dot matrix) for big moments, Space Mono 11px for labels, Space Grotesk for text,
+ *     JetBrains Mono for code.
+ *   - Shapes: cards 22px, rows 14px, fields 8–12px, pills 17px, switches = the shell's Toggle.
+ *   - Texture: dot grids (DotScope / the lock screen rain) on empty canvases and rules.
+ *
+ *  Style Settings (plugin) toggles at the bottom.
+ */
+
+/* ------------------------------------------------------------------ palette & tokens */
+body.theme-dark,
+body.theme-light {
+	--raven-void: #000000;
+	--raven-surface: #0e0e0e;
+	--raven-raised: #1a1a1a;
+	--raven-line: #2a2a2a;
+	--raven-off: #333333;
+	--raven-muted: #7a7a7a;
+	--raven-dim: #a3a3a3;
+	--raven-ink: #f2f2f2;
+	--raven-lime: #c6ff00;
+	--raven-lime-rgb: 198, 255, 0;
+	--raven-fast: 140ms;
+	--raven-normal: 240ms;
+
+	--raven-dots: radial-gradient(circle, var(--raven-off) 1.1px, transparent 1.6px);
+	--raven-dots-size: 12px 12px;
+
+	color-scheme: dark;
+
+	/* fonts */
+	--font-interface-theme: "Space Grotesk", "Inter", sans-serif;
+	--font-text-theme: "Space Grotesk", "Inter", sans-serif;
+	--font-monospace-theme: "JetBrainsMono Nerd Font", "JetBrains Mono", "Space Mono", monospace;
+	--raven-font-label: "Space Mono", monospace;
+	--raven-font-dot: "Doto", "Space Mono", monospace;
+
+	/* accent (hsl of #C6FF00) */
+	--accent-h: 74;
+	--accent-s: 100%;
+	--accent-l: 50%;
+
+	/* backgrounds */
+	--background-primary: var(--raven-void);
+	--background-primary-alt: var(--raven-surface);
+	--background-secondary: var(--raven-void);
+	--background-secondary-alt: var(--raven-surface);
+	--background-modifier-hover: var(--raven-raised);
+	--background-modifier-active-hover: var(--raven-raised);
+	--background-modifier-border: var(--raven-line);
+	--background-modifier-border-hover: var(--raven-off);
+	--background-modifier-border-focus: var(--raven-muted);
+	--background-modifier-form-field: var(--raven-surface);
+	--background-modifier-form-field-highlighted: var(--raven-surface);
+	--background-modifier-box-shadow: transparent;
+	--background-modifier-cover: rgba(0, 0, 0, 0.72);
+	--background-modifier-error: var(--raven-lime);
+	--background-modifier-success: var(--raven-lime);
+
+	/* text */
+	--text-normal: var(--raven-ink);
+	--text-muted: var(--raven-dim);
+	--text-faint: var(--raven-muted);
+	--text-accent: var(--raven-lime);
+	--text-accent-hover: #d9ff4d;
+	--text-on-accent: #000000;
+	--text-on-accent-inverted: #000000;
+	--text-error: var(--raven-lime);
+	--text-success: var(--raven-lime);
+	--text-warning: var(--raven-lime);
+	--text-selection: rgba(var(--raven-lime-rgb), 0.2);
+	--text-highlight-bg: var(--raven-lime);
+	--text-highlight-bg-active: var(--raven-lime);
+	--caret-color: var(--raven-lime);
+
+	/* interactive */
+	--interactive-normal: transparent;
+	--interactive-hover: var(--raven-raised);
+	--interactive-accent: var(--raven-lime);
+	--interactive-accent-hover: #d9ff4d;
+	--interactive-accent-hsl: 74, 100%, 50%;
+	--color-accent: var(--raven-lime);
+	--color-accent-1: var(--raven-lime);
+	--color-accent-2: #d9ff4d;
+
+	/* named colours folded into the palette: the shell has one accent */
+	--color-red: var(--raven-lime);
+	--color-orange: var(--raven-lime);
+	--color-yellow: var(--raven-lime);
+	--color-green: var(--raven-lime);
+	--color-cyan: var(--raven-dim);
+	--color-blue: var(--raven-ink);
+	--color-purple: var(--raven-dim);
+	--color-pink: var(--raven-dim);
+	--color-base-00: var(--raven-void);
+	--color-base-05: #070707;
+	--color-base-10: var(--raven-surface);
+	--color-base-20: var(--raven-surface);
+	--color-base-25: var(--raven-raised);
+	--color-base-30: var(--raven-line);
+	--color-base-35: var(--raven-off);
+	--color-base-40: #4a4a4a;
+	--color-base-50: var(--raven-muted);
+	--color-base-60: #8e8e8e;
+	--color-base-70: var(--raven-dim);
+	--color-base-100: var(--raven-ink);
+
+	/* shape */
+	--radius-s: 8px;
+	--radius-m: 14px;
+	--radius-l: 22px;
+	--radius-xl: 22px;
+	--input-radius: 8px;
+	--button-radius: 17px;
+	--checkbox-radius: 50%;
+	--toggle-radius: 10px;
+	--toggle-thumb-radius: 6px;
+	--toggle-width: 34px;
+	--toggle-thumb-width: 12px;
+	--toggle-thumb-height: 12px;
+	--toggle-border-width: 1px;
+	--shadow-s: none;
+	--shadow-l: none;
+	--input-shadow: none;
+	--input-shadow-hover: none;
+	--border-width: 1px;
+	--divider-color: var(--raven-line);
+	--divider-width: 1px;
+
+	/* chrome */
+	--titlebar-background: transparent;
+	--titlebar-background-focused: transparent;
+	--titlebar-text-color: var(--raven-muted);
+	--titlebar-text-color-focused: var(--raven-dim);
+	--ribbon-background: var(--raven-void);
+	--ribbon-background-collapsed: var(--raven-void);
+	--tab-background-active: var(--raven-surface);
+	--tab-text-color: var(--raven-muted);
+	--tab-text-color-active: var(--raven-ink);
+	--tab-text-color-focused: var(--raven-dim);
+	--tab-text-color-focused-active: var(--raven-ink);
+	--tab-text-color-focused-active-current: var(--raven-ink);
+	--tab-outline-color: var(--raven-line);
+	--tab-divider-color: transparent;
+	--tab-radius: 14px;
+	--tab-radius-active: 14px;
+	--tab-curve: 0px;
+	--tab-stacked-header-width: 40px;
+	--status-bar-background: var(--raven-void);
+	--status-bar-border-color: var(--raven-line);
+	--status-bar-text-color: var(--raven-muted);
+	--status-bar-radius: 14px 0 0 0;
+	--status-bar-font-size: 11px;
+	--nav-item-color: var(--raven-dim);
+	--nav-item-color-hover: var(--raven-ink);
+	--nav-item-color-active: var(--raven-ink);
+	--nav-item-color-selected: var(--raven-ink);
+	--nav-item-background-hover: var(--raven-raised);
+	--nav-item-background-active: var(--raven-raised);
+	--nav-item-background-selected: var(--raven-raised);
+	--nav-item-radius: 14px;
+	--nav-collapse-icon-color: var(--raven-muted);
+	--nav-heading-color: var(--raven-ink);
+	--icon-color: var(--raven-dim);
+	--icon-color-hover: var(--raven-ink);
+	--icon-color-active: var(--raven-ink);
+	--icon-color-focused: var(--raven-ink);
+	--icon-opacity: 1;
+	--icon-opacity-hover: 1;
+	--icon-opacity-active: 1;
+	--clickable-icon-radius: 8px;
+	--scrollbar-bg: transparent;
+	--scrollbar-thumb-bg: var(--raven-line);
+	--scrollbar-active-thumb-bg: var(--raven-muted);
+	--modal-background: var(--raven-void);
+	--modal-border-color: var(--raven-line);
+	--modal-border-width: 1px;
+	--modal-radius: 22px;
+	--prompt-border-color: var(--raven-line);
+	--prompt-border-width: 1px;
+	--menu-background: var(--raven-void);
+	--menu-border-color: var(--raven-line);
+	--menu-radius: 14px;
+	--menu-shadow: none;
+	--popover-background: var(--raven-void);
+	--slider-track-background: var(--raven-raised);
+	--slider-thumb-border-color: var(--raven-ink);
+	--slider-thumb-radius: 6px;
+	--slider-track-height: 6px;
+
+	/* editor content */
+	--h1-font: var(--raven-font-dot);
+	--h1-weight: 900;
+	--h1-size: 2.35em;
+	--h1-line-height: 1.15;
+	--h1-letter-spacing: 0.02em;
+	--h1-color: var(--raven-ink);
+	--h2-font: var(--font-text-theme);
+	--h2-weight: 600;
+	--h2-size: 1.55em;
+	--h2-letter-spacing: -0.01em;
+	--h2-color: var(--raven-ink);
+	--h3-font: var(--font-text-theme);
+	--h3-weight: 600;
+	--h3-size: 1.2em;
+	--h3-color: var(--raven-ink);
+	--h4-font: var(--raven-font-label);
+	--h4-weight: 400;
+	--h4-size: 0.8em;
+	--h4-color: var(--raven-dim);
+	--h4-letter-spacing: 0.14em;
+	--h4-variant: normal;
+	--h5-font: var(--raven-font-label);
+	--h5-weight: 400;
+	--h5-size: 0.75em;
+	--h5-color: var(--raven-muted);
+	--h5-letter-spacing: 0.14em;
+	--h6-font: var(--raven-font-label);
+	--h6-weight: 400;
+	--h6-size: 0.72em;
+	--h6-color: var(--raven-muted);
+	--h6-letter-spacing: 0.14em;
+	--inline-title-font: var(--raven-font-dot);
+	--inline-title-weight: 900;
+	--inline-title-size: 2.35em;
+	--inline-title-color: var(--raven-ink);
+	--inline-title-letter-spacing: 0.02em;
+
+	--bold-color: var(--raven-ink);
+	--bold-weight: 700;
+	--italic-color: var(--raven-dim);
+	--link-color: var(--raven-ink);
+	--link-color-hover: var(--raven-lime);
+	--link-decoration: underline;
+	--link-decoration-hover: underline;
+	--link-decoration-thickness: 1px;
+	--link-unresolved-color: var(--raven-muted);
+	--link-unresolved-opacity: 1;
+	--link-unresolved-decoration-style: dotted;
+	--link-unresolved-decoration-color: var(--raven-off);
+	--link-external-color: var(--raven-ink);
+	--link-external-color-hover: var(--raven-lime);
+
+	--list-marker-color: var(--raven-muted);
+	--list-marker-color-hover: var(--raven-ink);
+	--list-marker-color-collapsed: var(--raven-lime);
+	--list-bullet-size: 0.32em;
+	--list-indent: 1.9em;
+	--indentation-guide-color: var(--raven-line);
+	--indentation-guide-color-active: var(--raven-off);
+
+	--checkbox-size: 1.05em;
+	--checkbox-color: var(--raven-lime);
+	--checkbox-color-hover: #d9ff4d;
+	--checkbox-border-color: var(--raven-off);
+	--checkbox-border-color-hover: var(--raven-muted);
+	--checkbox-marker-color: #000000;
+	--checklist-done-color: var(--raven-muted);
+	--checklist-done-decoration: line-through;
+
+	--blockquote-border-color: var(--raven-lime);
+	--blockquote-border-thickness: 2px;
+	--blockquote-color: var(--raven-dim);
+	--blockquote-background-color: transparent;
+	--blockquote-font-style: normal;
+
+	--tag-color: var(--raven-dim);
+	--tag-color-hover: var(--raven-ink);
+	--tag-background: transparent;
+	--tag-background-hover: var(--raven-raised);
+	--tag-border-color: var(--raven-line);
+	--tag-border-color-hover: var(--raven-lime);
+	--tag-border-width: 1px;
+	--tag-radius: 17px;
+	--tag-padding-x: 0.75em;
+	--tag-padding-y: 0.2em;
+	--tag-size: 0.78em;
+	--tag-weight: 400;
+
+	--hr-color: var(--raven-off);
+	--hr-thickness: 0px;
+
+	--code-background: var(--raven-surface);
+	--code-normal: var(--raven-ink);
+	--code-comment: var(--raven-muted);
+	--code-function: var(--raven-ink);
+	--code-important: var(--raven-lime);
+	--code-keyword: var(--raven-lime);
+	--code-operator: var(--raven-dim);
+	--code-property: var(--raven-dim);
+	--code-punctuation: var(--raven-muted);
+	--code-string: #b9b9b9;
+	--code-tag: var(--raven-lime);
+	--code-value: var(--raven-lime);
+	--code-radius: 14px;
+	--code-size: 0.88em;
+	--code-white-space: pre-wrap;
+
+	--table-border-color: var(--raven-line);
+	--table-header-background: transparent;
+	--table-header-background-hover: var(--raven-raised);
+	--table-header-color: var(--raven-muted);
+	--table-header-font: var(--raven-font-label);
+	--table-header-size: 0.72em;
+	--table-header-weight: 400;
+	--table-row-background-hover: var(--raven-surface);
+	--table-selection: rgba(var(--raven-lime-rgb), 0.15);
+	--table-selection-border-color: var(--raven-lime);
+
+	--embed-border-left: 1px solid var(--raven-line);
+	--embed-padding: 0 0 0 1.2em;
+
+	--metadata-label-font: var(--raven-font-label);
+	--metadata-label-font-size: 11px;
+	--metadata-label-text-color: var(--raven-muted);
+	--metadata-input-font: var(--font-monospace-theme);
+	--metadata-input-font-size: 13px;
+	--metadata-border-color: var(--raven-line);
+	--metadata-divider-color: var(--raven-line);
+	--metadata-property-radius: 8px;
+
+	--callout-radius: 14px;
+	--callout-border-width: 1px;
+	--callout-border-opacity: 1;
+	--callout-padding: 14px 18px;
+	--callout-title-weight: 400;
+	--callout-title-size: 0.78em;
+	--callout-blend-mode: normal;
+
+	/* graph */
+	--graph-line: var(--raven-line);
+	--graph-node: var(--raven-ink);
+	--graph-node-focused: var(--raven-lime);
+	--graph-node-unresolved: var(--raven-off);
+	--graph-node-tag: var(--raven-lime);
+	--graph-node-attachment: var(--raven-muted);
+	--graph-text: var(--raven-dim);
+}
+
+/* one accent for every callout type; the icon tells them apart */
+.callout {
+	--callout-color: var(--raven-lime-rgb) !important;
+	background: var(--raven-surface) !important;
+	border: 1px solid var(--raven-line) !important;
+}
+.callout-title {
+	font-family: var(--raven-font-label);
+	text-transform: uppercase;
+	letter-spacing: 0.14em;
+	color: var(--raven-lime);
+}
+.callout-title-inner { font-weight: 400; }
+.callout-content { color: var(--raven-ink); }
+
+/* ------------------------------------------------------------------ the frame */
+body {
+	-webkit-font-smoothing: antialiased;
+	font-feature-settings: "ss01", "tnum";
+}
+.app-container, .workspace, .horizontal-main-container { background: var(--raven-void); }
+
+/* THE SHELL FRAME
+ * Like the RAVEN desktop: the ribbon + left sidebar are the bar/frame (plain black, no dividers),
+ * and the editor area is the window on the workspace: a rounded card (frame radius 20px,
+ * tokens.json) with an 8px gap top/right/bottom, so it curves in where it meets the sidebar.
+ * The right sidebar, when open, is frame too (the gap moves to its side). */
+body {
+	--raven-frame: 8px;
+	--raven-frame-radius: 20px;
+}
+.app-container, .horizontal-main-container, .workspace { background: var(--raven-void); }
+.workspace-split.mod-root {
+	/* splits are height: 100%; the gaps have to come out of that, or the bottom edge is clipped */
+	height: calc(100% - 2 * var(--raven-frame));
+	box-sizing: border-box;
+	margin: var(--raven-frame) var(--raven-frame) var(--raven-frame) 0;
+	border: 1px solid var(--raven-line);
+	border-radius: var(--raven-frame-radius);
+	overflow: hidden;
+}
+.workspace:has(.mod-right-split:not(.is-sidedock-collapsed)) .workspace-split.mod-root { margin-right: 0; }
+.workspace:has(.mod-left-split.is-sidedock-collapsed) .workspace-split.mod-root { margin-left: var(--raven-frame); }
+body:not(.show-ribbon) .workspace:has(.mod-left-split.is-sidedock-collapsed) .workspace-split.mod-root { margin-left: var(--raven-frame); }
+/* the frame parts: no dividers; their rows line up with the window's (same 8px top gap) */
+.workspace-ribbon, .workspace-ribbon.mod-primary.is-collapsed {
+	border: none !important;
+	background: var(--raven-void) !important;
+}
+.workspace-ribbon.mod-primary::before { border-bottom: none !important; background: transparent !important; }
+/* the vault switcher + help/settings at the bottom of the sidebar: part of the frame, no borders */
+.workspace-sidedock-vault-profile {
+	border: none !important;
+	background: var(--raven-void) !important;
+}
+.workspace-drawer-vault-switcher, .workspace-sidedock-vault-profile .workspace-drawer-vault-switcher {
+	border: none !important;
+	box-shadow: none !important;
+	background: transparent;
+	border-radius: 14px;
+}
+.workspace-sidedock-vault-profile .workspace-drawer-vault-switcher:hover { background: var(--raven-raised); }
+.workspace-split.mod-left-split, .workspace-split.mod-right-split {
+	box-sizing: border-box;
+	padding-top: var(--raven-frame);
+	padding-bottom: var(--raven-frame);
+	background: var(--raven-void);
+}
+.workspace-split.mod-left-split > .workspace-leaf-resize-handle,
+.workspace-split.mod-right-split > .workspace-leaf-resize-handle { border-color: transparent !important; }
+.mod-left-split .workspace-tab-header-container, .mod-right-split .workspace-tab-header-container { border-bottom: none !important; }
+/* Obsidian's own window buttons sit on the window's tab row, inside the curve */
+body.is-hidden-frameless:not(.is-fullscreen) .titlebar { top: var(--raven-frame); right: calc(var(--raven-frame) + 6px); }
+/* status bar: a small floating pill inside the window, bottom right */
+body .status-bar {
+	bottom: calc(var(--raven-frame) + 8px);
+	right: calc(var(--raven-frame) + 10px);
+	border: 1px solid var(--raven-line) !important;
+	border-radius: 14px !important;
+	z-index: 31;
+}
+
+/* splits are hairlines, like the shell's dividers */
+.workspace-leaf-resize-handle { background: transparent; }
+.workspace-split.mod-left-split > .workspace-leaf-resize-handle,
+.workspace-split.mod-right-split > .workspace-leaf-resize-handle { border-color: var(--raven-line); }
+.workspace-split.mod-root .view-content { background: var(--raven-void); }
+.mod-left-split .workspace-tabs, .mod-right-split .workspace-tabs { background: var(--raven-void); }
+
+/* title bar: quiet, labels in the label face */
+/* the title bar overlays the tab row (Obsidian frame): keep it transparent; window controls only
+   change colour on hover, never fill */
+.titlebar-text { font-family: var(--raven-font-label); font-size: 11px; letter-spacing: 0.08em; color: var(--raven-muted); }
+.titlebar-button { color: var(--raven-muted); background: transparent !important; }
+.titlebar-button:hover { color: var(--raven-ink); }
+.titlebar-button.mod-close:hover { color: var(--raven-lime); }
+
+.workspace-ribbon .side-dock-ribbon-action { border-radius: 8px; color: var(--raven-dim); }
+.workspace-ribbon .side-dock-ribbon-action:hover { background: var(--raven-raised); color: var(--raven-ink); }
+
+/* round icon buttons = CircleButton */
+.clickable-icon { border-radius: 8px; transition: background var(--raven-fast), color var(--raven-fast); }
+.clickable-icon:hover { background: var(--raven-raised); }
+.clickable-icon.is-active,
+.mod-sidedock .workspace-tab-header.is-active .workspace-tab-header-inner-icon,
+.nav-action-button.is-active,
+.view-action.is-active {
+	background: var(--raven-ink) !important;
+	color: #000 !important;
+}
+.clickable-icon.is-active svg, .nav-action-button.is-active svg, .view-action.is-active svg { color: #000; }
+
+/* sidebar tab icons: the quick-settings tile look (ink disc when active) */
+.mod-left-split .workspace-tab-header-container,
+.mod-right-split .workspace-tab-header-container {
+	background: var(--raven-void);
+	border-bottom: 1px solid var(--raven-line);
+}
+.mod-left-split .workspace-tab-header,
+.mod-right-split .workspace-tab-header { border-radius: 8px; }
+.mod-left-split .workspace-tab-header.is-active,
+.mod-right-split .workspace-tab-header.is-active { background: transparent; box-shadow: none; }
+.mod-left-split .workspace-tab-header.is-active .workspace-tab-header-inner,
+.mod-right-split .workspace-tab-header.is-active .workspace-tab-header-inner {
+	background: var(--raven-ink);
+	color: #000;
+	border-radius: 8px;
+}
+.mod-left-split .workspace-tab-header.is-active .workspace-tab-header-inner-icon svg,
+.mod-right-split .workspace-tab-header.is-active .workspace-tab-header-inner-icon svg { color: #000; }
+
+/* editor tabs: pills; the current one raised with a lime dot (the bar's active workspace) */
+.workspace .mod-root .workspace-tab-header-container {
+	background: var(--raven-void);
+	border-bottom: 1px solid var(--raven-line);
+	padding-left: 8px;
+}
+.workspace .mod-root .workspace-tab-header {
+	border-radius: 14px;
+	margin: 4px 2px;
+	padding: 0;
+	transition: background var(--raven-fast);
+}
+.workspace .mod-root .workspace-tab-header::before,
+.workspace .mod-root .workspace-tab-header::after { display: none !important; }
+.workspace .mod-root .workspace-tab-header:hover { background: var(--raven-raised); }
+.workspace .mod-root .workspace-tab-header.is-active {
+	background: var(--raven-surface);
+	box-shadow: inset 0 0 0 1px var(--raven-line);
+}
+.workspace .mod-root .workspace-tab-header-inner { padding: 0 12px; }
+.workspace .mod-root .workspace-tab-header-inner::after { display: none; }
+.workspace .mod-root .workspace-tab-header-inner-title { font-size: 13px; }
+.workspace .mod-root .workspace-tab-header.is-active .workspace-tab-header-inner-title::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-right: 8px;
+	vertical-align: 1px;
+	border-radius: 3px;
+	background: var(--raven-lime);
+}
+.workspace-tab-header-new-tab .clickable-icon { border-radius: 8px; }
+/* editor tabs with an icon (Home, graph, settings…): the icon turns lime when active, no fill;
+   the lime dot is only for tabs without an icon (notes, new tabs) */
+.workspace .mod-root .workspace-tab-header .workspace-tab-header-inner-icon { background: transparent !important; }
+.workspace .mod-root .workspace-tab-header.is-active .workspace-tab-header-inner-icon,
+.workspace .mod-root .workspace-tab-header.is-active .workspace-tab-header-inner-icon svg { color: var(--raven-lime) !important; }
+.workspace .mod-root .workspace-tab-header.is-active:not([data-type="markdown"]):not([data-type="empty"]) .workspace-tab-header-inner-title::before { display: none; }
+
+/* view header: the breadcrumb is a Label */
+.view-header { background: var(--raven-void); border-bottom: 1px solid var(--raven-line); }
+.view-header-title, .view-header-breadcrumb, .view-header-title-parent {
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	color: var(--raven-muted);
+}
+.view-header-title { color: var(--raven-dim); }
+
+/* file explorer: launcher rows (14px, raised when chosen) + the lime pill on the open note */
+.nav-files-container, .nav-folder, .tree-item { font-size: 13.5px; }
+.tree-item-self { border-radius: 14px; transition: background var(--raven-fast), color var(--raven-fast); }
+.nav-file-title.is-active, .tree-item-self.is-active { position: relative; font-weight: 500; }
+.nav-file-title.is-active::before, .tree-item-self.is-active::before {
+	content: "";
+	position: absolute;
+	left: 3px;
+	top: 50%;
+	width: 3px;
+	height: 14px;
+	margin-top: -7px;
+	border-radius: 2px;
+	background: var(--raven-lime);
+}
+.nav-folder-title { color: var(--raven-dim); }
+.nav-file-tag {
+	font-family: var(--raven-font-label);
+	font-size: 9.5px;
+	letter-spacing: 0.08em;
+	color: var(--raven-muted);
+	background: transparent;
+	border: 1px solid var(--raven-line);
+	border-radius: 8px;
+}
+.nav-header .nav-buttons-container { gap: 4px; }
+
+/* status bar: a Label row with the shell's live dot */
+.status-bar {
+	font-family: var(--raven-font-label);
+	letter-spacing: 0.04em;
+}
+.status-bar::before {
+	content: "";
+	align-self: center;
+	width: 6px;
+	height: 6px;
+	margin: 0 6px 0 4px;
+	border-radius: 3px;
+	background: var(--raven-lime);
+}
+.status-bar-item { color: var(--raven-muted); }
+.status-bar-item.mod-clickable:hover { background: var(--raven-raised); color: var(--raven-ink); border-radius: 8px; }
+
+/* ------------------------------------------------------------------ panels: modals, menus, prompts */
+.modal, .prompt, .suggestion-container, .menu, .popover.hover-popover {
+	background: var(--raven-void);
+	border: 1px solid var(--raven-line);
+	box-shadow: none;
+}
+.modal { border-radius: 22px; }
+.modal-bg { background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(6px); }
+.modal-title { font-family: var(--font-text-theme); font-weight: 600; }
+.modal-close-button { border-radius: 8px; }
+.menu { border-radius: 14px; padding: 6px; }
+.menu-item { border-radius: 10px; }
+.menu-item.selected:not(.is-disabled):not(.is-label) { background: var(--raven-raised); }
+.menu-separator { border-color: var(--raven-line); }
+
+/* command palette / quick switcher = the RAVEN launcher */
+.prompt { border-radius: 22px; padding: 12px; }
+.prompt-input-container { margin-bottom: 8px; }
+.prompt-input {
+	height: 44px !important;
+	border-radius: 12px !important;
+	border: 1px solid var(--raven-line) !important;
+	background: var(--raven-surface) !important;
+	font-family: var(--raven-font-label) !important;
+	font-size: 14px !important;
+	padding-left: 16px !important;
+}
+.prompt-input:focus { border-color: var(--raven-muted) !important; box-shadow: none !important; }
+.suggestion-item {
+	border-radius: 14px;
+	min-height: 44px;
+	display: flex;
+	align-items: center;
+	color: var(--raven-dim);
+}
+.suggestion-item.is-selected { background: var(--raven-raised); color: var(--raven-ink); }
+.suggestion-hotkey, .prompt-instruction-command, kbd {
+	font-family: var(--raven-font-label);
+	font-size: 10.5px;
+	color: var(--raven-dim);
+	background: transparent;
+	border: 1px solid var(--raven-line);
+	border-radius: 6px;
+	padding: 1px 6px;
+	box-shadow: none;
+}
+.prompt-instructions { font-family: var(--raven-font-label); font-size: 11px; color: var(--raven-muted); border-top: 1px solid var(--raven-line); }
+
+/* settings: section headings as Labels, cards in the sidebar */
+.vertical-tab-header { background: var(--raven-void); border-right: 1px solid var(--raven-line); }
+.vertical-tab-header-group-title {
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--raven-muted);
+}
+.vertical-tab-nav-item { border-radius: 14px; }
+.vertical-tab-nav-item.is-active { background: var(--raven-ink); color: #000; }
+.vertical-tab-content-container { background: var(--raven-void); }
+.setting-item { border-top: 1px solid var(--raven-line); }
+.setting-item-heading .setting-item-name {
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--raven-dim);
+}
+.setting-item-description { color: var(--raven-muted); }
+
+/* notices = shell notification cards */
+.notice-container { gap: 8px; }
+.notice {
+	background: var(--raven-void);
+	color: var(--raven-ink);
+	border: 1px solid var(--raven-line);
+	border-radius: 18px;
+	box-shadow: none;
+	font-size: 13.5px;
+	padding: 14px 18px 14px 32px;
+	position: relative;
+}
+.notice::before {
+	content: "";
+	position: absolute;
+	left: 16px;
+	top: 21px;
+	width: 6px;
+	height: 6px;
+	border-radius: 3px;
+	background: var(--raven-lime);
+}
+.tooltip {
+	background: var(--raven-surface);
+	color: var(--raven-dim);
+	border: 1px solid var(--raven-line);
+	border-radius: 8px;
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	box-shadow: none;
+}
+.tooltip .tooltip-arrow { display: none; }
+
+/* ------------------------------------------------------------------ controls */
+/* buttons: hairline pills; the call to action is the VPN card's lime "Connect" */
+button:not(.clickable-icon), .button {
+	border-radius: 17px !important;
+	background: transparent;
+	border: 1px solid var(--raven-line);
+	box-shadow: none !important;
+	color: var(--raven-dim);
+	font-family: var(--font-interface-theme);
+	transition: background var(--raven-fast), color var(--raven-fast), border-color var(--raven-fast);
+}
+button:not(.clickable-icon):hover { background: var(--raven-raised); color: var(--raven-ink); border-color: var(--raven-off); }
+button.mod-cta {
+	background: transparent;
+	color: var(--raven-lime);
+	border-color: var(--raven-lime);
+}
+button.mod-cta:hover { background: var(--raven-lime); color: #000; border-color: var(--raven-lime); }
+button.mod-warning { color: var(--raven-lime); border-color: var(--raven-lime); background: transparent; }
+button.mod-warning:hover { background: var(--raven-lime); color: #000; }
+
+/* fields = Field.qml */
+input[type="text"], input[type="search"], input[type="email"], input[type="password"],
+input[type="number"], input[type="date"], input[type="datetime-local"], textarea, select, .dropdown {
+	background-color: var(--raven-surface);
+	/* via Obsidian's own variable, so places that zero it (property rows) stay borderless */
+	border: var(--input-border-width, 1px) solid var(--raven-line);
+	border-radius: 8px;
+	box-shadow: none;
+	color: var(--raven-ink);
+	font-family: var(--raven-font-label);
+	font-size: 13px;
+}
+input:focus, textarea:focus, select:focus, .dropdown:focus {
+	border-color: var(--raven-muted) !important;
+	box-shadow: none !important;
+}
+input::placeholder, textarea::placeholder { color: var(--raven-muted); }
+
+/* switches = Toggle.qml (ink track and black knob when on) */
+.checkbox-container {
+	background: transparent;
+	border: 1px solid var(--raven-off);
+	box-shadow: none;
+	transition: background var(--raven-fast), border-color var(--raven-fast);
+}
+.checkbox-container:hover { border-color: var(--raven-muted); }
+.checkbox-container::after { background: var(--raven-muted); box-shadow: none; transform: translate3d(3px, 0, 0); }
+.checkbox-container.is-enabled { background: var(--raven-ink); border-color: var(--raven-ink); }
+.checkbox-container.is-enabled::after { background: #000; transform: translate3d(17px, 0, 0); }
+
+/* sliders: the volume meter's segments, ink thumb */
+input[type="range"] {
+	background: repeating-linear-gradient(90deg, var(--raven-raised) 0 8px, transparent 8px 11px);
+	height: 8px;
+	border-radius: 3px;
+}
+input[type="range"]::-webkit-slider-thumb {
+	background: var(--raven-ink);
+	border: none;
+	width: 6px;
+	height: 18px;
+	border-radius: 3px;
+	box-shadow: none;
+	cursor: pointer;
+}
+
+/* scrollbars: hairline-thin */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+
+/* ------------------------------------------------------------------ the page */
+.markdown-source-view.mod-cm6 .cm-content, .markdown-preview-view { font-size: 15.5px; }
+.markdown-rendered, .markdown-source-view { line-height: 1.65; }
+
+/* H1 / inline title in dot matrix */
+.inline-title { margin-bottom: 0.4em; }
+
+/* H2 sits on a dotted rule (the DotScope baseline) */
+.markdown-rendered h2, .markdown-source-view .HyperMD-header-2 {
+	padding-bottom: 0.35em;
+	background-image: radial-gradient(circle, var(--raven-off) 1px, transparent 1.4px);
+	background-size: 8px 4px;
+	background-repeat: repeat-x;
+	background-position: left bottom;
+}
+/* H4–H6: section labels */
+.markdown-rendered :is(h4, h5, h6), .markdown-source-view :is(.HyperMD-header-4, .HyperMD-header-5, .HyperMD-header-6) {
+	text-transform: uppercase;
+}
+.cm-formatting-header { color: var(--raven-off) !important; font-family: var(--raven-font-label); }
+
+/* %% comments %% (the templates' example hints): faint italic hints while editing; the %% markers
+   only appear on the line being edited, like Obsidian's other formatting. Reading view hides them. */
+.markdown-source-view.mod-cm6 .cm-comment {
+	color: #5c5c5c;   /* between off and muted: readable, clearly not content */
+	font-style: italic;
+	font-size: 0.88em;
+}
+.markdown-source-view.mod-cm6 .cm-line:not(.cm-active) .cm-comment-start,
+.markdown-source-view.mod-cm6 .cm-line:not(.cm-active) .cm-comment-end { display: none; }
+
+/* links: ink text, lime underline */
+.cm-hmd-internal-link, .markdown-rendered .internal-link, .markdown-rendered .external-link, .cm-link, .cm-url {
+	text-decoration-color: var(--raven-lime) !important;
+	text-underline-offset: 3px;
+}
+.external-link { background-image: none; padding-right: 0; }
+.external-link::after { content: " ↗"; font-family: var(--raven-font-label); font-size: 0.75em; color: var(--raven-muted); }
+
+/* highlights: a lime marker, black text */
+.cm-highlight, .markdown-rendered mark {
+	color: #000 !important;
+	background: var(--raven-lime) !important;
+	border-radius: 3px;
+	padding: 0 2px;
+}
+
+/* tags: hairline pills, label face, lime hash */
+.tag, .cm-hashtag {
+	font-family: var(--raven-font-label);
+	letter-spacing: 0.04em;
+}
+a.tag::first-letter { color: var(--raven-lime); }
+.cm-hashtag-begin { color: var(--raven-lime) !important; }
+.cm-hashtag { border: 1px solid var(--raven-line); background: transparent; }
+.cm-hashtag-begin { border-right: none !important; }
+.cm-hashtag-end { border-left: none !important; }
+
+/* lists: dots, not discs */
+.list-bullet::after, .cm-formatting-list-ul .list-bullet::after {
+	background-color: var(--raven-muted);
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+}
+
+/* tasks: round, lime when done (the shell's "done" dot) */
+input[type="checkbox"]:not(.task-list-item-checkbox):not([data-task]) { border-radius: 4px; }
+.task-list-item-checkbox, .markdown-source-view input[type="checkbox"].task-list-item-checkbox {
+	border-radius: 50% !important;
+	border: 1px solid var(--raven-off) !important;
+	background: transparent;
+}
+.task-list-item-checkbox:checked { background: var(--raven-lime) !important; border-color: var(--raven-lime) !important; }
+.task-list-item-checkbox:checked::after { background-color: #000; }
+
+/* code: surface cards; inline code is a small hairline chip */
+.markdown-rendered code, .cm-s-obsidian span.cm-inline-code {
+	background: var(--raven-surface);
+	border: 1px solid var(--raven-line);
+	border-radius: 6px;
+	padding: 0.08em 0.38em;
+	color: var(--raven-ink);
+}
+.markdown-rendered pre, .HyperMD-codeblock-bg {
+	background: var(--raven-surface) !important;
+	border: 1px solid var(--raven-line);
+	border-radius: 14px;
+}
+.markdown-source-view .HyperMD-codeblock-begin-bg { border-radius: 14px 14px 0 0; border-bottom: none; }
+.markdown-source-view .HyperMD-codeblock-end-bg { border-radius: 0 0 14px 14px; border-top: none; }
+.markdown-source-view .HyperMD-codeblock-bg:not(.HyperMD-codeblock-begin-bg):not(.HyperMD-codeblock-end-bg) { border-top: none; border-bottom: none; border-radius: 0; }
+.markdown-rendered pre code { border: none; background: transparent; padding: 0; }
+.copy-code-button { font-family: var(--raven-font-label); font-size: 10.5px; border-radius: 8px !important; }
+
+/* rules: a dot-matrix line */
+.markdown-rendered hr, .markdown-source-view .hr hr {
+	border: none !important;
+	height: 4px;
+	background-image: radial-gradient(circle, var(--raven-off) 1.2px, transparent 1.7px);
+	background-size: 10px 4px;
+	background-repeat: repeat-x;
+	margin: 2em 0;
+}
+
+/* blockquote: lime hairline on the left */
+.markdown-rendered blockquote { padding: 0.1em 0 0.1em 1.1em; }
+
+/* tables: hairlines, header row in the label face */
+.markdown-rendered th, .table-view-table > thead > tr > th {
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+}
+
+/* properties (front matter): a hairline card */
+.metadata-container {
+	border: 1px solid var(--raven-line);
+	border-radius: 14px;
+	padding: 10px 14px;
+	background: var(--raven-void);
+}
+.metadata-properties-heading .metadata-properties-title {
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--raven-muted);
+}
+/* property rows: plain text on the card, a raised row on hover/focus (like launcher rows) */
+.metadata-property { border-radius: 8px; padding-inline: 4px; }
+.metadata-property:hover, .metadata-property:focus-within { background: var(--raven-raised); box-shadow: none; }
+.metadata-property input, .metadata-property .metadata-input-text, .metadata-property .metadata-property-key-input,
+.metadata-property .multi-select-container {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+}
+.metadata-property-key-input { color: var(--raven-muted); font-family: var(--raven-font-label); font-size: 12px; }
+.metadata-property-value, .metadata-property-value input { color: var(--raven-ink); }
+.metadata-property-value .metadata-input-text.mod-date { font-family: var(--raven-font-label); font-size: 12.5px; }
+.metadata-property-value input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); }
+.metadata-property-value .multi-select-pill {
+	background: transparent;
+	border: 1px solid var(--raven-line);
+	border-radius: 17px;
+	font-family: var(--raven-font-label);
+	font-size: 11px;
+	color: var(--raven-dim);
+}
+
+/* ------------------------------------------------------------------ dot-grid canvases */
+.workspace-leaf-content[data-type="graph"] .view-content,
+.workspace-leaf-content[data-type="localgraph"] .view-content,
+.workspace-leaf-content[data-type="canvas"] .canvas-wrapper,
+.workspace-leaf-content[data-type="empty"] .view-content {
+	background-color: var(--raven-void);
+	background-image: var(--raven-dots);
+	background-size: var(--raven-dots-size);
+}
+.canvas-background { display: none; }
+.canvas-node-container { border-radius: 22px; border: 1px solid var(--raven-line); background: var(--raven-void); box-shadow: none; }
+.canvas-node.is-focused .canvas-node-container, .canvas-node.is-selected .canvas-node-container { border-color: var(--raven-lime); }
+.graph-controls { background: var(--raven-void); border: 1px solid var(--raven-line); border-radius: 14px; }
+
+/* empty tab: dot-matrix title, label-style actions */
+.empty-state-title { font-family: var(--raven-font-dot); font-weight: 900; font-size: 2.2em; color: var(--raven-ink); }
+.empty-state-action {
+	font-family: var(--raven-font-label);
+	font-size: 12px;
+	color: var(--raven-dim) !important;
+	border: 1px solid var(--raven-line);
+	border-radius: 17px;
+	padding: 6px 14px;
+	margin: 4px 0;
+	background: var(--raven-void);
+}
+.empty-state-action:hover { color: #000 !important; background: var(--raven-ink); border-color: var(--raven-ink); }
+
+/* ------------------------------------------------------------------ Hearth (home dashboard)
+ * Hearth tints its surfaces by mixing in the accent: with lime that's a green wash. RAVEN keeps
+ * surfaces neutral, so the tints are replaced; the cards become shell cards. */
+/* on every Hearth element: some (the weather widget) re-declare the tints on themselves */
+body .hearth-view, body [class*="hearth-"] {
+	--x-surface: var(--raven-void) !important;
+	--x-surface-high: var(--raven-surface) !important;
+	--x-surface-highest: var(--raven-raised) !important;
+	--x-container: var(--raven-raised) !important;
+	--x-on-container: var(--raven-ink) !important;
+	--x-frame-surface: var(--raven-void) !important;
+	--x-dialog: var(--raven-void) !important;
+	--x-tertiary: var(--raven-dim) !important;
+	--x-tertiary-container: var(--raven-raised) !important;
+	--x-on-tertiary-container: var(--raven-ink) !important;
+}
+body .hearth-card {
+	background: var(--raven-void) !important;
+	border: 1px solid var(--raven-line) !important;
+	border-radius: 22px !important;
+	box-shadow: none !important;
+}
+body .hearth-card-title, body .hearth-section-title, body .hearth-agenda-label {
+	font-family: var(--raven-font-label) !important;
+	font-size: 11px !important;
+	font-weight: 400 !important;
+	letter-spacing: 0.06em;
+	color: var(--raven-muted) !important;
+}
+/* the clock is the lock screen's dot-matrix clock */
+body .hearth-clock-time, body .hearth-clock-flip-num, body .hearth-clock-stack-h, body .hearth-clock-stack-m {
+	font-family: var(--raven-font-dot) !important;
+	font-weight: 900 !important;
+	letter-spacing: 0.02em !important;
+	color: var(--raven-ink) !important;
+}
+body .hearth-clock-date {
+	font-family: var(--raven-font-label) !important;
+	color: var(--raven-dim) !important;
+}
+body .hearth-clock-greeting {
+	font-family: var(--raven-font-label) !important;
+	font-size: 11px !important;
+	color: var(--raven-lime) !important;
+	background: transparent !important;
+	border: 1px solid var(--raven-line) !important;
+	border-radius: 17px !important;
+}
+/* search bar = launcher field; buttons = pills */
+body .hearth-search-bar {
+	background: var(--raven-surface) !important;
+	border: 1px solid var(--raven-line) !important;
+	border-radius: 12px !important;
+	box-shadow: none !important;
+}
+body .hearth-search-bar .hearth-search-input, body .hearth-search-input {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	font-family: var(--raven-font-label) !important;
+}
+body .hearth-searchbar-row .hearth-newnote { border-radius: 17px !important; }
+body .hearth-wx-backdrop { fill: var(--raven-raised) !important; }
+/* the board's title is the RAVEN wordmark: dot matrix */
+body .hearth-title-text {
+	font-family: var(--raven-font-dot) !important;
+	font-weight: 900 !important;
+	letter-spacing: 0.04em !important;
+}
+/* round buttons, like CircleButton */
+body .hearth-folder-bar-button {
+	border-radius: 50% !important;
+	background: transparent !important;
+	border: 1px solid var(--raven-line) !important;
+	color: var(--raven-dim) !important;
+}
+body .hearth-folder-bar-button:hover { background: var(--raven-raised) !important; color: var(--raven-ink) !important; }
+body .hearth-search-bar:focus-within { border-color: var(--raven-muted) !important; }
+body :is(.hearth-dash-btn, .hearth-open-btn, .hearth-tool-btn, .hearth-card-action) {
+	border-radius: 17px !important;
+	background: transparent !important;
+	border: 1px solid var(--raven-line) !important;
+	color: var(--raven-dim) !important;
+	box-shadow: none !important;
+}
+body :is(.hearth-dash-btn, .hearth-open-btn, .hearth-tool-btn, .hearth-card-action):hover {
+	background: var(--raven-raised) !important;
+	color: var(--raven-ink) !important;
+}
+body :is(.hearth-weather-chip, .hearth-task-chip, .hearth-sun-chip, .hearth-git-chip, .hearth-sched-chip) {
+	background: transparent !important;
+	border: 1px solid var(--raven-line) !important;
+	border-radius: 17px !important;
+	color: var(--raven-dim) !important;
+	font-family: var(--raven-font-label) !important;
+	font-size: 11px !important;
+}
+body .hearth-task-chip-dot, body .hearth-agenda-dot { background: var(--raven-lime) !important; }
+body .hearth-weather-temp { font-family: var(--raven-font-dot) !important; font-weight: 900 !important; }
+body .hearth-bg { background-color: var(--raven-void) !important; }
+
+/* ------------------------------------------------------------------ Style Settings */
+/* @settings
+name: RAVEN
+id: raven
+settings:
+    -
+        id: raven-no-doto
+        title: Plain headings
+        description: Use Space Grotesk for H1 and note titles instead of the dot-matrix face
+        type: class-toggle
+    -
+        id: raven-no-dots
+        title: No dot grids
+        description: Plain black behind the graph, canvas and empty tabs
+        type: class-toggle
+*/
+body.raven-no-doto {
+	--h1-font: var(--font-text-theme);
+	--h1-weight: 700;
+	--h1-letter-spacing: -0.02em;
+	--inline-title-font: var(--font-text-theme);
+	--inline-title-weight: 700;
+	--inline-title-letter-spacing: -0.02em;
+}
+body.raven-no-dots {
+	--raven-dots: none;
+}

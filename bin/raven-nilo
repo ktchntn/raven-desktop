@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""raven-nilo: NIHIL's Nilo assistant (shown as Huginn in RAVEN), backed by Claude Code instead of a local Ollama model.
+
+The shell (services/Nilo.qml) runs this as Nilo's agent and speaks NIHIL's line protocol on
+stdin/stdout ({"op": ...} in, {"ev": ...} out). This runs one headless Claude Code session per
+conversation:
+
+  claude -p --input-format stream-json --output-format stream-json --include-partial-messages
+         --permission-mode manual --permission-prompt-tool stdio --tools <allowed> ...
+
+so it uses the user's Claude Code login (subscription, no API key), and every action Claude Code
+would ask about arrives here as a `can_use_tool` control request, shown as Nilo's confirm card
+(commands with danger tags, file changes as a diff). Claude Code's own read-only auto-approvals
+still apply. Tool calls are shown under Nilo's tool names (Bash -> run_command, Read -> read_file...).
+
+Settings (~/.config/raven/nilo.json): model (opus/sonnet/haiku), access toggles (web, system,
+write, git, shell, apps -> which tools Claude Code gets), repo (working folder), and context
+notes in ~/.config/raven/nilo.md (appended to the system prompt). Changing them restarts the
+session with --resume, so the conversation carries on.
+"""
+import difflib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+CONF = os.path.join(HOME, ".config", "raven", "nilo.json")
+NOTES = os.path.join(HOME, ".config", "raven", "nilo.md")
+DEFAULTS = {
+    "onboarded": True,      # NIHIL's intro is about downloading a local model: skipped
+    "model": "sonnet",
+    "web": True,
+    "system": True,
+    "apps": True,
+    "write": False,
+    "git": False,
+    "shell": False,
+    "repo": "~",
+}
+MODELS = [
+    {"tag": "opus", "label": "Claude Opus", "installed": True, "size": 0, "ram": 0},
+    {"tag": "sonnet", "label": "Claude Sonnet", "installed": True, "size": 0, "ram": 0},
+    {"tag": "haiku", "label": "Claude Haiku", "installed": True, "size": 0, "ram": 0},
+]
+CARD_LINES = 40
+TAIL = 12
+RESTART_KEYS = {"model", "web", "system", "write", "git", "shell", "repo"}
+
+# From NIHIL's agent.py (MIT): what makes a command worth a warning on its card.
+RISKS = [
+    ("root", r"(^|[;&|(\s])(sudo|doas|pkexec|run0)\s"),
+    ("delete", r"(^|[;&|(\s])(rm\s+(-\w*[rRf]|--recursive|--force)|shred\s|find\s.*-delete\b|truncate\s)"),
+    ("disk", r"(^|[;&|(\s])(mkfs\S*|wipefs|fdisk|sfdisk|parted|sgdisk|cryptsetup|dd)\s|>\s*/dev/(sd|nvme|mmcblk|vd)"),
+    ("git", r"\bgit\s+(push\s.*(--force|-f\b|--delete)|reset\s+--hard|clean\s+-\w*f|branch\s+-D|checkout\s+--\s|restore\s)"),
+    ("power", r"(^|[;&|(\s])(shutdown|reboot|poweroff|halt|systemctl\s+(--\S+\s+)*(poweroff|reboot|halt|suspend|hibernate|kexec))\b"),
+    ("system", r"\bsystemctl\s+(--\S+\s+)*(stop|disable|mask|restart|kill)\b|\bapt(-get)?\s+(remove|purge|autoremove)\b"),
+    ("permissions", r"\bch(mod|own|grp)\s+(-\w*R|--recursive)"),
+    ("internet", r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|da)?sh\b"),
+]
+
+PROMPT = """You are Huginn, the assistant built into the RAVEN desktop: Hyprland on Kali Linux, in a Parallels VM on the user's Mac. The user is {user}, a security practitioner (labs, CTFs, authorized engagements).
+You answer in a small chat panel of the desktop shell, not a terminal:
+- Keep replies short and plain: a few sentences or a short list, Markdown, small code blocks.
+- Every action you take shows the user a card to approve first: one step per tool call, and say in one line what it does and why before calling it. If the user declines, don't retry another way: ask what they'd rather do.
+- Commands run without a terminal: nothing interactive, no pagers, keep output short. For sudo or anything interactive, give the user the command to run themselves.
+- Working folder: {repo}.
+{access}"""
+
+
+def log(*parts):
+    print("raven-nilo:", *parts, file=sys.stderr, flush=True)
+
+
+def short(path):
+    path = str(path or "")
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + "/") else path
+
+
+class Bridge:
+    def __init__(self):
+        self.out_lock = threading.Lock()
+        self.settings = self.load()
+        self.proc = None
+        self.session = None          # Claude Code session id, for --resume
+        self.stale = False           # settings changed: restart before the next question
+        self.busy = False
+        self.stopping = False
+        self.started = 0.0
+        self.tools = {}              # tool_use_id -> {"name", "nilo", "args", "facts"}
+        self.pending = {}            # control request_id -> tool_use_id
+        self.declined = set()
+        self.reply_open = False
+
+    # ---- settings ----
+    def load(self):
+        try:
+            data = json.load(open(CONF))
+        except (OSError, ValueError):
+            data = {}
+        return {**DEFAULTS, **{k: v for k, v in data.items() if k in DEFAULTS}}
+
+    def save(self):
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        tmp = CONF + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.settings, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, CONF)
+
+    def repo(self):
+        return os.path.expanduser(str(self.settings.get("repo") or "~"))
+
+    # ---- to the shell ----
+    def emit(self, **event):
+        with self.out_lock:
+            sys.stdout.write(json.dumps(event) + "\n")
+            sys.stdout.flush()
+
+    def hello(self):
+        self.emit(ev="hello", settings=self.settings, models=MODELS, recommended="sonnet", fast="",
+                  ramGB=0, ollama=True)
+        self.state()
+
+    def state(self):
+        # Nothing to load or keep warm: report "loaded" so the shell never asks to warm a model.
+        self.emit(ev="state", model=self.settings["model"], loaded=True, loading=False, expires=0,
+                  sizeGB=0, gpu=0, ollama=True)
+
+    # ---- Claude Code process ----
+    def allowed_tools(self):
+        s = self.settings
+        tools = []
+        if s["system"]:
+            tools += ["Read", "Glob", "Grep"]
+        if s["web"]:
+            tools += ["WebSearch", "WebFetch"]
+        if s["write"]:
+            tools += ["Edit", "Write", "NotebookEdit"]
+        if s["shell"]:
+            tools += ["Bash"]
+        return tools
+
+    def system_prompt(self):
+        s = self.settings
+        off = [name for key, name in (("web", "the web"), ("system", "reading files"), ("write", "changing files"),
+                                      ("shell", "running commands")) if not s[key]]
+        access = ""
+        if off:
+            access = ("- The user has not given you " + ", ".join(off) + " (Huginn's settings, the gear icon). "
+                      "If a request needs it, say so and point there.\n")
+        if s["shell"] and not s["git"]:
+            access += "- Don't commit or push with git: the user has not allowed git in Huginn's settings.\n"
+        user = os.environ.get("USER", "")
+        text = PROMPT.format(user=user, repo=short(self.repo()), access=access)
+        try:
+            notes = open(NOTES).read().strip()
+        except OSError:
+            notes = ""
+        if notes:
+            text += "\n## The user's notes for you\n" + notes + "\n"
+        return text
+
+    def spawn(self):
+        claude = shutil.which("claude") or os.path.join(HOME, ".local", "bin", "claude")
+        tools = self.allowed_tools()
+        cmd = [claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+               "--include-partial-messages", "--permission-mode", "manual", "--permission-prompt-tool", "stdio",
+               "--model", self.settings["model"], "--tools", ",".join(tools) if tools else "",
+               "--strict-mcp-config", "--append-system-prompt", self.system_prompt()]
+        if self.settings["shell"] and not self.settings["git"]:
+            cmd += ["--disallowedTools", "Bash(git commit:*)", "Bash(git push:*)"]
+        if self.session:
+            cmd += ["--resume", self.session]
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        self.proc = subprocess.Popen(cmd, cwd=self.repo(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+        self.write({"type": "control_request", "request_id": "raven-init",
+                    "request": {"subtype": "initialize", "hooks": None}})
+        proc = self.proc
+        threading.Thread(target=self.read_claude, args=(proc,), daemon=True).start()
+        threading.Thread(target=self.read_stderr, args=(proc,), daemon=True).start()
+        self.stale = False
+
+    def kill(self):
+        proc, self.proc = self.proc, None
+        if proc and proc.poll() is None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def write(self, obj):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(json.dumps(obj) + "\n")
+                self.proc.stdin.flush()
+            except OSError as e:
+                log("write failed:", e)
+
+    def read_stderr(self, proc):
+        for line in proc.stderr:
+            line = line.strip()
+            if line:
+                log("claude:", line[:300])
+
+    def read_claude(self, proc):
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            try:
+                self.on_claude(msg)
+            except Exception as e:      # keep the conversation alive whatever one message does
+                log("bad message:", repr(e), line[:200])
+        code = proc.wait()
+        if proc is self.proc:
+            self.proc = None
+            if self.busy:
+                self.close_reply()
+                self.emit(ev="error", code="other", detail=f"Claude Code stopped (exit {code})")
+                self.finish(failed=True)
+
+    # ---- from Claude Code ----
+    def on_claude(self, msg):
+        kind = msg.get("type")
+        if kind == "system" and msg.get("subtype") == "init":
+            self.session = msg.get("session_id") or self.session
+        elif kind == "stream_event":
+            event = msg.get("event", {})
+            if msg.get("parent_tool_use_id"):
+                return              # a subagent's own stream
+            if event.get("type") == "content_block_start":
+                block = event.get("content_block", {})
+                if block.get("type") in ("thinking", "redacted_thinking"):
+                    self.emit(ev="thinking")
+                elif block.get("type") == "text":
+                    self.reply_open = True
+            elif event.get("type") == "content_block_delta":
+                delta = event.get("delta", {})
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    self.emit(ev="token", text=delta["text"])
+                elif delta.get("type") == "thinking_delta":
+                    self.emit(ev="thinking")
+        elif kind == "assistant":
+            if msg.get("parent_tool_use_id"):
+                return
+            for block in msg.get("message", {}).get("content", []):
+                if block.get("type") == "tool_use":
+                    self.tool_started(block)
+        elif kind == "user":
+            content = msg.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        self.tool_finished(block)
+        elif kind == "control_request":
+            request = msg.get("request", {})
+            if request.get("subtype") == "can_use_tool":
+                self.ask_permission(msg.get("request_id"), request)
+            else:
+                self.write({"type": "control_response", "response": {
+                    "subtype": "error", "request_id": msg.get("request_id"), "error": "not supported by raven-nilo"}})
+        elif kind == "result":
+            self.close_reply()
+            failed = bool(msg.get("is_error")) and not self.stopping
+            if failed:
+                detail = str(msg.get("result") or msg.get("subtype") or "error")
+                self.emit(ev="error", code="other", detail=detail[:300])
+            usage = msg.get("usage") or {}
+            seconds = (msg.get("duration_api_ms") or 0) / 1000
+            stats = {"tokens": usage.get("output_tokens", 0), "seconds": round(seconds, 2),
+                     "model": self.settings["model"]}
+            self.finish(failed=failed, stats=stats)
+
+    def close_reply(self):
+        self.reply_open = False
+
+    def finish(self, failed=False, stats=None):
+        cancelled = self.stopping
+        self.busy = False
+        self.stopping = False
+        self.pending.clear()
+        event = {"ev": "done", "failed": failed, "cancelled": cancelled}
+        if stats:
+            event["stats"] = stats
+        self.emit(**event)
+        if self.stale:
+            self.kill()
+
+    # ---- tools ----
+    @staticmethod
+    def nilo_tool(name, args):
+        if name == "Bash":
+            return "run_command", {"command": args.get("command", ""), "reason": args.get("description", "")}
+        if name == "Read":
+            return "read_file", {"path": short(args.get("file_path"))}
+        if name in ("Edit", "MultiEdit", "NotebookEdit"):
+            return "edit_file", {"path": short(args.get("file_path") or args.get("notebook_path"))}
+        if name == "Write":
+            return "write_file", {"path": short(args.get("file_path"))}
+        if name in ("Glob", "Grep", "LS"):
+            return "list_files", {"path": args.get("pattern") or args.get("path") or ""}
+        if name == "WebSearch":
+            return "web_search", {"query": args.get("query", "")}
+        if name == "WebFetch":
+            return "open_url", {"url": args.get("url", "")}
+        return name, {}
+
+    def tool_started(self, block):
+        tid = block.get("id")
+        if not tid or tid in self.tools:
+            return
+        name, args = self.nilo_tool(block.get("name", ""), block.get("input") or {})
+        self.tools[tid] = {"name": block.get("name", ""), "nilo": name, "args": args,
+                           "input": block.get("input") or {}, "facts": {}}
+        self.close_reply()
+        self.emit(ev="tool", status="running", id=tid, name=name, args=args)
+
+    @staticmethod
+    def result_text(block):
+        content = block.get("content")
+        if isinstance(content, list):
+            return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+        return str(content or "")
+
+    def tool_finished(self, block):
+        tid = block.get("tool_use_id")
+        tool = self.tools.get(tid)
+        if not tool:
+            return
+        text = self.result_text(block)
+        error = bool(block.get("is_error"))
+        declined = tid in self.declined
+        event = {"ev": "tool", "status": "done", "id": tid, "name": tool["nilo"], "ok": not error or declined,
+                 "declined": declined}
+        lines = [l for l in text.splitlines() if l.strip()]
+        if declined:
+            pass
+        elif error:
+            event["error"] = text.strip().splitlines()[0][:160] if text.strip() else "failed"
+        elif tool["nilo"] == "run_command":
+            event["exit"] = 0
+            event["tail"] = lines[-TAIL:]
+        elif tool["nilo"] == "read_file":
+            event["path"] = tool["args"]["path"]
+            event["lines"] = len(text.splitlines())
+        elif tool["nilo"] in ("edit_file", "write_file"):
+            event.update({"path": tool["args"]["path"], "added": 0, "removed": 0, "created": False})
+            event.update(tool["facts"])
+        elif tool["nilo"] == "list_files":
+            event["count"] = len(lines)
+        elif tool["nilo"] == "web_search":
+            event["count"] = len(set(re.findall(r"https?://[^\s\"')\]]+", text)))
+        elif tool["nilo"] == "open_url":
+            m = re.match(r"^[a-z]+://([^/?#]+)", tool["args"]["url"], re.I)
+            event["host"] = m.group(1) if m else tool["args"]["url"]
+        if error and tool["nilo"] == "run_command" and not declined:
+            event["ok"] = True              # a failing command is still a command that ran
+            event["exit"] = 1
+            event["tail"] = lines[-TAIL:]
+            event.pop("error", None)
+        self.emit(**event)
+
+    @staticmethod
+    def risks(command):
+        return [name for name, pattern in RISKS if re.search(pattern, command)]
+
+    @staticmethod
+    def diff(old, new):
+        lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=2))[2:]
+        shown, added, removed = [], 0, 0
+        for line in lines:
+            kind = "@" if line.startswith("@@") else line[:1]
+            if kind == "+":
+                added += 1
+            elif kind == "-":
+                removed += 1
+            if len(shown) < CARD_LINES:
+                shown.append({"t": kind, "s": "" if kind == "@" else line[1:][:300]})
+        return shown, max(0, len(lines) - CARD_LINES), added, removed
+
+    def file_change(self, name, args):
+        path = args.get("file_path") or args.get("notebook_path") or ""
+        try:
+            old = open(path, encoding="utf-8", errors="replace").read()
+            exists = True
+        except OSError:
+            old, exists = "", False
+        if name == "Write":
+            new = args.get("content", "")
+        elif name == "Edit":
+            a, b = args.get("old_string", ""), args.get("new_string", "")
+            new = old.replace(a, b) if args.get("replace_all") else old.replace(a, b, 1)
+        elif name == "MultiEdit":
+            new = old
+            for e in args.get("edits", []):
+                a, b = e.get("old_string", ""), e.get("new_string", "")
+                new = new.replace(a, b) if e.get("replace_all") else new.replace(a, b, 1)
+        else:
+            new = old + "\n" + str(args.get("new_source", ""))
+        shown, more, added, removed = self.diff(old, new)
+        return {"action": "create" if not exists else "edit", "path": short(path), "repo": short(self.repo()),
+                "diff": shown, "more": more, "added": added, "removed": removed}, \
+               {"added": added, "removed": removed, "created": not exists}
+
+    def ask_permission(self, request_id, request):
+        name = request.get("tool_name", "")
+        args = request.get("input") or {}
+        tid = request.get("tool_use_id") or request_id
+        if tid not in self.tools:
+            self.tool_started({"id": tid, "name": name, "input": args})
+        if name == "Bash":
+            command = args.get("command", "")
+            card = {"action": "run", "command": command, "cwd": short(self.repo()),
+                    "reason": args.get("description") or request.get("description") or "",
+                    "danger": self.risks(command)}
+        elif name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            card, facts = self.file_change(name, args)
+            self.tools[tid]["facts"] = facts
+        else:
+            summary = args.get("url") or args.get("query") or args.get("file_path") or args.get("pattern") \
+                or request.get("description") or json.dumps(args)[:200]
+            card = {"action": "tool", "tool": request.get("display_name") or name, "command": str(summary),
+                    "reason": request.get("description") or "", "danger": []}
+        self.pending[request_id] = tid
+        self.emit(ev="confirm", id=request_id, **card)
+
+    def answer(self, request_id, ok):
+        tid = self.pending.pop(request_id, None)
+        if tid is None:
+            return
+        if ok:
+            tool = self.tools.get(tid, {})
+            behavior = {"behavior": "allow", "updatedInput": tool.get("input", {})}
+        else:
+            self.declined.add(tid)
+            behavior = {"behavior": "deny", "message": "The user declined this in Huginn. Don't retry it another "
+                        "way: ask what they would rather do."}
+        self.write({"type": "control_response", "response": {"subtype": "success", "request_id": request_id,
+                                                              "response": behavior}})
+        self.emit(ev="confirmed", id=request_id, ok=ok)
+
+    # ---- from the shell ----
+    def ask(self, text):
+        if self.busy:
+            self.emit(ev="error", code="busy")
+            return
+        if not os.path.isdir(self.repo()):
+            self.emit(ev="error", code="bad-repo", detail=self.settings.get("repo", ""))
+            self.emit(ev="done", failed=True, cancelled=False)
+            return
+        if self.stale:
+            self.kill()
+        if not self.proc or self.proc.poll() is not None:
+            try:
+                self.spawn()
+            except OSError as e:
+                self.emit(ev="error", code="other", detail=f"cannot start claude: {e}")
+                self.emit(ev="done", failed=True, cancelled=False)
+                return
+        self.busy = True
+        self.stopping = False
+        self.started = time.monotonic()
+        self.emit(ev="start", model=self.settings["model"])
+        self.write({"type": "user", "message": {"role": "user", "content": text}})
+
+    def stop(self):
+        if not self.busy:
+            return
+        self.stopping = True
+        for request_id in list(self.pending):
+            self.answer(request_id, False)
+        self.write({"type": "control_request", "request_id": f"raven-stop-{time.monotonic()}",
+                    "request": {"subtype": "interrupt"}})
+
+    def reset(self):
+        if self.busy:
+            self.stop()
+        self.kill()
+        self.session = None
+        self.busy = False
+        self.tools.clear()
+        self.pending.clear()
+        self.declined.clear()
+        self.emit(ev="reset")
+
+    def set(self, key, value):
+        if key not in DEFAULTS:
+            return
+        self.settings[key] = value
+        self.save()
+        self.emit(ev="settings", settings=self.settings)
+        if key in RESTART_KEYS:
+            self.stale = True
+            if not self.busy:
+                self.kill()
+        if key == "model":
+            self.state()
+
+    def repos(self):
+        found = []
+        skip = {"node_modules", ".cache", ".local", ".npm", ".cargo", ".rustup", "go"}
+        for root, dirs, _ in os.walk(HOME):
+            depth = root[len(HOME):].count("/")
+            if ".git" in dirs:
+                found.append(short(root))
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in skip] if depth < 3 else []
+        self.emit(ev="repos", repos=sorted(found)[:30])
+
+    def notes(self):
+        if not os.path.exists(NOTES):
+            os.makedirs(os.path.dirname(NOTES), exist_ok=True)
+            with open(NOTES, "w") as f:
+                f.write("<!-- Notes for Nilo: added to Claude's instructions for every new conversation. -->\n")
+        self.stale = True
+        self.emit(ev="notes", path=NOTES)
+
+    def handle(self, request):
+        op = request.get("op")
+        if op == "hello":
+            self.hello()
+        elif op == "ask":
+            self.ask(str(request.get("text", "")))
+        elif op == "stop":
+            self.stop()
+        elif op == "reset":
+            self.reset()
+        elif op == "confirm":
+            self.answer(request.get("id"), bool(request.get("ok")))
+        elif op == "set":
+            self.set(request.get("key"), request.get("value"))
+        elif op == "repos":
+            self.repos()
+        elif op == "notes":
+            self.notes()
+        elif op in ("warm", "sleep", "status"):
+            self.state()
+        # pull / cancelPull / delete / startOllama / launched: local-model features, nothing to do
+
+
+def main():
+    bridge = Bridge()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except ValueError:
+                continue
+            bridge.handle(request)
+    finally:
+        bridge.kill()
+
+
+if __name__ == "__main__":
+    main()

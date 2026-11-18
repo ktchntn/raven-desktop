@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Renders every picture in the wallpaper sources as LED dots, at each monitor's size.
+set -euo pipefail
+src="$HOME/.local/share/raven/wallpaper-sources"
+out="$HOME/.local/share/raven/wallpapers"
+renderer="$HOME/.local/src/Nihil-Shell/theme/dotmatrix.py"
+if command -v hyprctl >/dev/null && hyprctl -j monitors >/dev/null 2>&1; then
+	mapfile -t specs < <(hyprctl -j monitors | jq -r '.[] | "\(.name):\((.width/.scale)|floor)x\((.height/.scale)|floor):9"')
+else
+	mapfile -t specs < <(xrandr --query | awk '/ connected/{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+x[0-9]+\+/){split($i,a,"+"); print $1":"a[1]":9"}}')
+fi
+for pic in "$src"/*.{png,jpg,jpeg,gif,webp}; do
+	[ -e "$pic" ] || continue
+	name=$(basename "${pic%.*}" | sed 's/[^A-Za-z0-9_]\+/-/g')
+	args=(); for s in "${specs[@]}"; do [ -s "$out/$name/${s%%:*}.png" ] || args+=(--output "$s"); done
+	[ ${#args[@]} -eq 0 ] && continue
+	echo "rendering $name for ${args[*]}"
+	python3 -I "$renderer" "$pic" "$out/$name" "${args[@]}"
+done

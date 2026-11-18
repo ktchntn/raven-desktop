@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""raven-hash: save a hash from clipboard history and copy the command that cracks it.
+
+  raven-hash save ID     decode clipboard history entry ID (cliphist), pick out every line of the
+                         recognised format (NTLM from pwdump/secretsdump lines: the NT part), add the
+                         new ones to ~/Loot/hashes/<mode>-<slug>.txt and copy
+                           hashcat -m <mode> <file> /usr/share/wordlists/rockyou.txt
+                         (john for yescrypt), with a notification.
+  raven-hash identify    read text on stdin, print the recognised format as JSON (or null)
+
+Rules: keep in step with qml/services/HashId.js (the shell's chips use those).
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+LOOT = os.path.expanduser("~/Loot/hashes")
+WORDLIST = "/usr/share/wordlists/rockyou.txt"
+
+# (pattern on one line, label, hashcat mode or -1 for john, slug); same order as HashId.js
+RULES = [
+    (r"^\$krb5tgs\$23\$", "KRB5 TGS", 13100, "krb5tgs"),
+    (r"^\$krb5tgs\$17\$", "KRB5 TGS AES128", 19600, "krb5tgs-aes128"),
+    (r"^\$krb5tgs\$18\$", "KRB5 TGS AES256", 19700, "krb5tgs-aes256"),
+    (r"^\$krb5asrep\$23\$", "AS-REP", 18200, "asrep"),
+    (r"(?i)^\$DCC2\$\d+#[^#\s]+#[0-9a-f]{32}", "DCC2", 2100, "dcc2"),
+    (r"^\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}$", "bcrypt", 3200, "bcrypt"),
+    (r"^\$6\$[^$\s]{1,16}\$[./A-Za-z0-9]{20}", "sha512crypt", 1800, "sha512crypt"),
+    (r"^\$5\$[^$\s]{1,16}\$[./A-Za-z0-9]{20}", "sha256crypt", 7400, "sha256crypt"),
+    (r"^\$1\$[^$\s]{1,8}\$[./A-Za-z0-9]{22}$", "md5crypt", 500, "md5crypt"),
+    (r"^\$y\$[^$\s]+\$[^$\s]+\$[./A-Za-z0-9]{20}", "yescrypt", -1, "yescrypt"),
+    (r"(?i)^[^\s:]+::[^\s:]*:[0-9a-f]{16}:[0-9a-f]{32}:[0-9a-f]", "NetNTLMv2", 5600, "netntlmv2"),
+    (r"(?i)^[^\s:]+::[^\s:]*:[0-9a-f]{48}:[0-9a-f]{48}:[0-9a-f]{16}", "NetNTLMv1", 5500, "netntlmv1"),
+    (r"(?i)^[^\s:]+:\d+:[0-9a-f]{32}:[0-9a-f]{32}:::", "NTLM", 1000, "ntlm"),
+    (r"^eyJ[\w-]{10,}\.eyJ[\w-]+", "JWT", 16500, "jwt"),
+    (r"(?i)^[0-9a-f]{32}$", "NTLM / MD5", 1000, "ntlm"),
+    (r"(?i)^[0-9a-f]{40}$", "SHA1", 100, "sha1"),
+    (r"(?i)^[0-9a-f]{64}$", "SHA256", 1400, "sha256"),
+]
+RULES = [(re.compile(p), label, mode, slug) for p, label, mode, slug in RULES]
+PWDUMP = re.compile(r"(?i)^[^\s:]+:\d+:[0-9a-f]{32}:([0-9a-f]{32}):::")
+
+
+def identify(line):
+    for pattern, label, mode, slug in RULES:
+        if pattern.search(line.strip()):
+            return {"label": label, "mode": mode, "slug": slug}
+    return None
+
+
+def hashes(text, rule):
+    """Every line of `text` in the format of `rule`, as the cracker wants it."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        found = identify(line)
+        if not found or found["slug"] != rule["slug"]:
+            continue
+        m = PWDUMP.match(line)
+        out.append(m.group(1).lower() if m else line)
+    return out
+
+
+def notify(title, body, urgency="normal"):
+    subprocess.run(["notify-send", f"--urgency={urgency}", "--app-name=Hashes",
+                    "--hint=string:x-raven-tag:hashes", title, body],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def save(entry_id):
+    text = subprocess.run(["cliphist", "decode"], input=f"{entry_id}\t\n", capture_output=True,
+                          text=True).stdout
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    rule = identify(first)
+    if not rule:
+        notify("No hash recognised", "That clipboard entry isn't a format raven-hash knows.")
+        return 1
+    found = hashes(text, rule)
+    os.makedirs(LOOT, exist_ok=True)
+    mode = rule["mode"]
+    path = os.path.join(LOOT, f"{mode if mode >= 0 else 'john'}-{rule['slug']}.txt")
+    try:
+        have = set(open(path).read().splitlines())
+    except OSError:
+        have = set()
+    new = [h for h in dict.fromkeys(found) if h not in have]
+    if new:
+        with open(path, "a") as f:
+            f.write("\n".join(new) + "\n")
+    short = path.replace(os.path.expanduser("~"), "~", 1)
+    if mode >= 0:
+        command = f"hashcat -m {mode} {short} {WORDLIST}"
+    else:
+        command = f"john --format=crypt --wordlist={WORDLIST} {short}"
+    subprocess.run(["wl-copy", "--", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    added = f"{len(new)} new" if new else "already saved"
+    notify(f"{rule['label']} → {short}", f"{added} · {len(have) + len(new)} in file\nCopied: {command}")
+    return 0
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "save":
+        sys.exit(save(sys.argv[2]))
+    if sys.argv[1:] == ["identify"]:
+        print(json.dumps(identify(sys.stdin.read().splitlines()[0] if sys.stdin else "")))
+        return
+    sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

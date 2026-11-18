@@ -1,0 +1,25 @@
+# RAVEN: tldr (tealdeer) — offline command cheat sheets, in RAVEN's colours.
+[display]
+compact = false
+use_pager = false
+
+[updates]
+auto_update = true
+auto_update_interval_hours = 720   # refresh the pages once a month
+
+[style.description]
+foreground = { rgb = { r = 163, g = 163, b = 163 } }   # dim
+
+[style.command_name]
+foreground = { rgb = { r = 198, g = 255, b = 0 } }     # lime
+bold = true
+
+[style.example_text]
+foreground = { rgb = { r = 242, g = 242, b = 242 } }   # ink
+
+[style.example_code]
+foreground = { rgb = { r = 198, g = 255, b = 0 } }     # lime
+
+[style.example_variable]
+foreground = { rgb = { r = 122, g = 122, b = 122 } }   # muted
+underline = true

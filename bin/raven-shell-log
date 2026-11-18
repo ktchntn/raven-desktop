@@ -1,0 +1,20 @@
+#!/bin/sh
+# raven-shell-log: keep the RAVEN shell's (Quickshell) log across reboots, the way hyprland.lua keeps
+# Hyprland's. $XDG_RUNTIME_DIR is wiped on restart, so after "it froze and I had to restart" the
+# lock screen's / shell's own log is otherwise gone.
+#   ~/.cache/raven/shell-last.log   this session (follows shell restarts too)
+#   ~/.cache/raven/shell-prev.log   the session before
+# Autostarted from hyprland.lua; one per session.
+d="$HOME/.cache/raven"
+mkdir -p "$d"
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/raven-shell-log.lock"
+flock -n 9 || exit 0
+[ -f "$d/shell-last.log" ] && mv -f "$d/shell-last.log" "$d/shell-prev.log"
+echo "=== session $(date '+%F %T') · ${HYPRLAND_INSTANCE_SIGNATURE:-?}" > "$d/shell-last.log"
+while :; do
+    start=$(date +%s)
+    qs log -c raven -f >> "$d/shell-last.log" 2>/dev/null
+    # qs log returns when that shell instance exits (or at once if none runs yet)
+    [ $(( $(date +%s) - start )) -gt 3 ] && echo "=== shell exited $(date +%T)" >> "$d/shell-last.log"
+    sleep 3
+done

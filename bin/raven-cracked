@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""raven-cracked: tell me the moment hashcat or john cracks something.
+
+Watches the potfiles (hashcat: ~/.local/share/hashcat/hashcat.potfile, also ~/.hashcat/;
+john: ~/.john/john.pot) once every 2 s. New lines -> a critical notification, which the shell
+turns into the double lime sweep and the critical sound:
+
+    Cracked: 1 new                 NTLM · ~/Loot/hashes/1000-ntlm.txt      [Copy password]
+
+The password itself is never shown in the notification (screen sharing, recordings); the button
+copies it (several: one per line). The hash is matched against ~/Loot/hashes/*.txt (raven-hash's
+files) to say which file it came from. Lines already in the potfiles at startup are not news.
+
+  raven-cracked     run (one per session; autostarted from hyprland.lua)
+"""
+import binascii
+import fcntl
+import glob
+import os
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+POTS = [os.path.join(HOME, ".local/share/hashcat/hashcat.potfile"),
+        os.path.join(HOME, ".hashcat/hashcat.potfile"),
+        os.path.join(HOME, ".john/john.pot")]
+LOOT = os.path.join(HOME, "Loot/hashes")
+RUN = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+LABELS = {"ntlm": "NTLM", "netntlmv2": "NetNTLMv2", "netntlmv1": "NetNTLMv1", "krb5tgs": "Kerberos TGS",
+          "krb5tgs-aes128": "Kerberos TGS AES128", "krb5tgs-aes256": "Kerberos TGS AES256",
+          "asrep": "AS-REP", "dcc2": "DCC2", "bcrypt": "bcrypt", "sha512crypt": "sha512crypt",
+          "sha256crypt": "sha256crypt", "md5crypt": "md5crypt", "yescrypt": "yescrypt", "jwt": "JWT",
+          "sha1": "SHA1", "sha256": "SHA256"}
+
+
+def size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return -1
+
+
+def plain(text):
+    """hashcat writes non-printable passwords as $HEX[...]"""
+    if text.startswith("$HEX[") and text.endswith("]"):
+        try:
+            return binascii.unhexlify(text[5:-1]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return text
+    return text
+
+
+def split(line, john):
+    """(hash, password) from a potfile line. The password is after the last ':' for hashcat
+    when the hash itself has colons (NetNTLM), so match against the Loot files instead."""
+    if john:
+        h, _, p = line.partition(":")
+        return h, p
+    for path in glob.glob(os.path.join(LOOT, "*.txt")):
+        try:
+            for known in open(path, errors="replace").read().splitlines():
+                if known and line.lower().startswith(known.lower() + ":"):
+                    return known, line[len(known) + 1:]
+        except OSError:
+            continue
+    h, _, p = line.rpartition(":") if line.count(":") > 1 and "::" in line else line.partition(":")
+    return h, p
+
+
+def source(h):
+    """(label, ~/Loot file) the hash came from, or ('', '')."""
+    for path in sorted(glob.glob(os.path.join(LOOT, "*.txt"))):
+        try:
+            lines = open(path, errors="replace").read().lower().splitlines()
+        except OSError:
+            continue
+        if h.lower() in lines:
+            slug = os.path.basename(path)[:-4].split("-", 1)[-1]
+            return LABELS.get(slug, slug), path.replace(HOME, "~", 1)
+    return "", ""
+
+
+def announce(found):
+    """found: [(hash, password)]"""
+    labels = []
+    for h, _ in found:
+        label, path = source(h)
+        labels.append(f"{label} · {path}" if label else "")
+    where = sorted({l for l in labels if l})
+    body = where[0] if len(where) == 1 else ", ".join(where) if where else "from the potfile"
+    title = f"Cracked: {len(found)} new"
+    button = "Copy password" if len(found) == 1 else f"Copy {len(found)} passwords"
+    picked = subprocess.run(["notify-send", "--urgency=critical", "--app-name=Cracking",
+                             "--hint=string:x-raven-tag:cracked", f"--action=copy={button}", title, body],
+                            capture_output=True, text=True).stdout.strip()
+    if picked == "copy":
+        subprocess.run(["wl-copy", "--", "\n".join(plain(p) for _, p in found)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    if sys.argv[1:]:
+        sys.exit(__doc__)
+    lock = open(os.path.join(RUN, "raven-cracked.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("raven-cracked: already running")
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)     # announcers reap themselves
+    offsets = {p: max(size(p), 0) for p in POTS}      # what's there now is not news
+    while True:
+        time.sleep(2)
+        for path in POTS:
+            now = size(path)
+            if now < 0:
+                continue
+            if now < offsets[path]:                      # truncated / replaced: start over
+                offsets[path] = 0
+            if now == offsets[path]:
+                continue
+            try:
+                with open(path, "rb") as f:
+                    f.seek(offsets[path])
+                    chunk = f.read(now - offsets[path])
+            except OSError:
+                continue
+            complete, _, _ = chunk.rpartition(b"\n")       # only whole lines
+            if not complete:
+                continue
+            offsets[path] += len(complete) + 1
+            lines = [l for l in complete.decode("utf-8", "replace").splitlines() if l.strip()]
+            if lines:
+                john = path.endswith("john.pot")
+                found = [split(l, john) for l in lines]
+                # The notification waits for its button; don't let that hold up watching.
+                child = subprocess.Popen([sys.executable, __file__, "--announce"], stdin=subprocess.PIPE,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+                child.stdin.write("\n".join(f"{h}\t{p}" for h, p in found).encode())
+                child.stdin.close()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--announce"]:
+        pairs = [l.split("\t", 1) for l in sys.stdin.read().splitlines() if "\t" in l]
+        announce([(h, p) for h, p in pairs])
+    else:
+        main()

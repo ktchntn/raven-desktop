@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "RAVEN Start",
+  "version": "1.2",
+  "description": "RAVEN new tab: clock, search with !bangs, pentest links",
+  "icons": {
+    "128": "icon.png"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "startpage@raven.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "chrome_settings_overrides": {
+    "homepage": "newtab.html"
+  }
+}

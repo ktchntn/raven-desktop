@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -uo pipefail
+run="${XDG_RUNTIME_DIR:-/tmp}/raven-record"; mkdir -p "$run"
+recording() { [ -f "$run/pid" ] && kill -0 "$(cat "$run/pid")" 2>/dev/null; }
+videos() { local d; d="$(xdg-user-dir VIDEOS 2>/dev/null)"; { [ -z "$d" ] || [ "$d" = "$HOME" ]; } && d="$HOME/Videos"; mkdir -p "$d" && echo "$d"; }
+failed() { notify-send -a RAVEN "Could not record" "$(tail -n 1 "$run/log" 2>/dev/null)" || true; }
+start() {
+	recording && return 0
+	local dir where; dir="$(videos)" || exit 1
+	if [ "${1:-region}" = screen ]; then where=(-o "$(hyprctl -j monitors | jq -r '.[] | select(.focused) | .name')")
+	else where=(-g "$(slurp)") || return 0; fi
+	file="$dir/RAVEN_$(date '+%Y-%m-%d_%H.%M.%S').mp4"; echo "$file" > "$run/file"
+	wf-recorder "${where[@]}" -x yuv420p -c libx264 -p crf=20 -p preset=veryfast -f "$file" > "$run/log" 2>&1 &
+	echo $! > "$run/pid"; sleep 0.5
+	if recording; then raven-ipc recorder started; else rm -f "$run/pid"; failed; fi
+}
+stop() {
+	[ -f "$run/pid" ] || { raven-ipc recorder stopped; return 0; }
+	local pid file; pid="$(cat "$run/pid")"
+	if recording; then kill -INT "$pid"; for _ in $(seq 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done; fi
+	rm -f "$run/pid"; raven-ipc recorder stopped
+	file="$(cat "$run/file")"
+	[ -s "$file" ] || { failed; return 0; }
+	wl-copy --type text/uri-list "file://$file" || true
+	notify-send -a RAVEN "Recording saved and copied" "${file/#$HOME/\~}" || true
+}
+case "${1:-toggle}" in
+	toggle) if [ -f "$run/pid" ]; then stop; else start "${2:-region}"; fi ;;
+	start) start "${2:-region}" ;; stop) stop ;;
+	status) recording && echo on || echo off ;;
+	*) echo "raven-record toggle|start [region|screen] | stop | status" >&2; exit 2 ;;
+esac

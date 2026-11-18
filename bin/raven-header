@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""raven-header: the RAVEN session header, printed when a new terminal opens.
+
+The RAVEN wordmark in braille (each character is a 2x4 grid of dots, so the 5x7 LED
+letters fit in two lines), with the date, the VPN address and what is listening.
+"""
+import datetime
+import json
+import os
+import subprocess
+
+FACE = {
+    "R": ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+    "A": [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+    "V": ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+    "E": ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+    "N": ["#...#", "##..#", "##..#", "#.#.#", "#..##", "#..##", "#...#"],
+}
+# Braille dot bits by (row within the cell, column within the cell).
+BIT = {(0, 0): 0x01, (1, 0): 0x02, (2, 0): 0x04, (3, 0): 0x40,
+       (0, 1): 0x08, (1, 1): 0x10, (2, 1): 0x20, (3, 1): 0x80}
+
+LIME, INK, DIM, MUTED, FAINT, RESET = ("\033[38;2;198;255;0m", "\033[38;2;242;242;242m",
+                                       "\033[38;2;163;163;163m", "\033[38;2;122;122;122m",
+                                       "\033[38;2;94;94;94m", "\033[0m")
+VPN_PREFIX = ("tun", "tap", "wg", "ppp", "ipsec", "vpn", "tailscale", "nordlynx", "proton")
+
+
+def wordmark():
+    grid = [[] for _ in range(8)]          # 7 LED rows, padded to 8 (two braille rows)
+    for k, letter in enumerate("RAVEN"):
+        if k:
+            for row in grid:
+                row.extend([False] * 3)      # three dots between letters keeps them legible
+        for y in range(8):
+            line = FACE[letter][y] if y < 7 else "....."
+            grid[y].extend(ch == "#" for ch in line)
+    width = len(grid[0]) + len(grid[0]) % 2
+    lines = []
+    for top in (0, 4):
+        out = ""
+        for x in range(0, width, 2):
+            code = 0x2800
+            for dy in range(4):
+                for dx in range(2):
+                    if x + dx < len(grid[0]) and grid[top + dy][x + dx]:
+                        code |= BIT[(dy, dx)]
+            out += chr(code)
+        lines.append(out)
+    return lines
+
+
+def vpn():
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=1).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) > 3 and cols[1].startswith(VPN_PREFIX):
+            return cols[1], cols[3].split("/")[0]
+    return None
+
+
+def listeners():
+    tool = os.path.expanduser("~/.local/bin/raven-listeners")
+    try:
+        out = subprocess.run([tool], capture_output=True, text=True, timeout=2).stdout
+        return json.loads(out)
+    except Exception:
+        return []
+
+
+def main():
+    now = datetime.datetime.now()
+    hour = now.strftime("%I").lstrip("0")
+    when = f"{now:%A} {now.day} {now:%B} · {hour}:{now:%M} {now:%p}"
+
+    tunnel = vpn()
+    parts = []
+    if tunnel:
+        parts.append(f"{LIME}{tunnel[0]} {tunnel[1]}{RESET}")
+    else:
+        parts.append(f"{MUTED}no VPN{RESET}")
+    found = listeners()
+    if found:
+        shown = "  ".join(f"{INK}{s['port']}{RESET} {DIM}{s['proc'] or 'root'}{RESET}" for s in found[:4])
+        more = f" {MUTED}+{len(found) - 4}{RESET}" if len(found) > 4 else ""
+        parts.append(f"{MUTED}listening{RESET} {shown}{more}")
+    status = f" {FAINT}·{RESET} ".join(parts)
+
+    top, bottom = wordmark()
+    gap = "   "
+    print()
+    print(f"  {LIME}{top}{RESET}{gap}{INK}{when}{RESET}")
+    print(f"  {LIME}{bottom}{RESET}{gap}{status}")
+    print(f"  {' ' * len(top)}{gap}{FAINT}\033[3mnevermore\033[23m{RESET}")
+
+
+if __name__ == "__main__":
+    main()

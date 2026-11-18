@@ -1,0 +1,12 @@
+{
+    // RAVEN: theme and fonts to match the rest of RAVEN.
+    "workbench.colorTheme": "RAVEN",
+    "window.titleBarStyle": "custom",
+    "editor.fontFamily": "'JetBrainsMono Nerd Font', 'JetBrains Mono', monospace",
+    "editor.fontSize": 13,
+    "editor.fontLigatures": true,
+    "editor.cursorWidth": 2,
+    "editor.minimap.renderCharacters": false,
+    "terminal.integrated.fontFamily": "'JetBrainsMono Nerd Font'",
+    "terminal.integrated.cursorStyle": "block"
+}

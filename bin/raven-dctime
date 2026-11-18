@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""raven-dctime (shell: `dctime`): set this machine's clock to a domain controller's, so Kerberos
+stops failing with KRB_AP_ERR_SKEW ("Clock skew too great"), and put it back afterwards.
+
+  dctime IP        ask the DC for its time (NTP, else SMB via nmap's smb2-time) and set the clock
+                   to it. Again while on: re-sync (to the same or another DC).
+  dctime off       back to normal time (undo the offset, resume Parallels' time sync)
+  dctime status    on/off, which DC, how far off from normal time
+
+Needs sudo (asked in the terminal). Parallels keeps the VM's clock in step with the Mac
+(prltimesync), which would undo this within moments: it is paused (SIGSTOP) while DC time is on
+and resumed (SIGCONT) by `dctime off`. A reboot always returns to normal time.
+While on, $XDG_RUNTIME_DIR/raven-dctime.json exists and the shell's bar shows a lime clock.
+"""
+import datetime
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+RUN = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+STATE = os.path.join(RUN, "raven-dctime.json")
+NTP_EPOCH = 2208988800
+
+
+def ntp_time(ip, port=123):
+    """The DC's UTC time now (epoch seconds) over SNTP, or None."""
+    packet = b"\x1b" + 47 * b"\0"
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(3)
+        try:
+            t0 = time.time()
+            s.sendto(packet, (ip, port))
+            data, _ = s.recvfrom(512)
+            t3 = time.time()
+        except OSError:
+            return None
+    if len(data) < 48:
+        return None
+    secs, frac = struct.unpack("!II", data[40:48])
+    if secs == 0:
+        return None
+    sent = secs - NTP_EPOCH + frac / 2 ** 32
+    return sent + (t3 - t0) / 2 + (time.time() - t3)
+
+
+def smb_time(ip):
+    """The DC's UTC time from SMB2 negotiate (nmap smb2-time), or None."""
+    try:
+        out = subprocess.run(["nmap", "-Pn", "-p445", "--script", "smb2-time", ip],
+                             capture_output=True, text=True, timeout=40).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"date:\s*(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", out)
+    if not m:
+        return None
+    dc = datetime.datetime.fromisoformat(m.group(1)).replace(tzinfo=datetime.timezone.utc).timestamp()
+    return dc   # whole seconds, taken during the scan: well inside Kerberos' 5-minute tolerance
+
+
+def human(seconds):
+    sign = "+" if seconds >= 0 else "-"
+    s = abs(seconds)
+    if s < 60:
+        return f"{sign}{s:.1f}s"
+    h, rest = divmod(int(round(s)), 3600)
+    m, sec = divmod(rest, 60)
+    return f"{sign}{h}h {m}m {sec}s" if h else f"{sign}{m}m {sec}s"
+
+
+def load():
+    try:
+        return json.load(open(STATE))
+    except (OSError, ValueError):
+        return None
+
+
+def sudo(*cmd):
+    return subprocess.run(["sudo", *cmd]).returncode == 0
+
+
+def timesync(signal_name):
+    """Pause / resume Parallels' guest time sync, if it runs."""
+    pids = subprocess.run(["pgrep", "-x", "prltimesync"], capture_output=True, text=True).stdout.split()
+    if pids:
+        sudo("kill", f"-{signal_name}", *pids)
+
+
+def set_clock(epoch):
+    return sudo("date", "-u", "-s", f"@{epoch:.3f}")
+
+
+def on(ip):
+    if not sudo("-v"):
+        return 1
+    print(f"asking {ip} for its time…", flush=True)
+    dc = ntp_time(ip)
+    how = "NTP"
+    if dc is None:
+        print("no NTP answer, trying SMB (nmap smb2-time)…", flush=True)
+        dc, how = smb_time(ip), "SMB"
+    if dc is None:
+        print(f"dctime: couldn't get the time from {ip} (NTP udp/123 and SMB tcp/445 both failed)",
+              file=sys.stderr)
+        return 1
+    before = time.time()
+    delta = dc - before
+    state = load() or {"offset": 0.0}
+    timesync("STOP")
+    if not set_clock(before + delta + (time.time() - before)):
+        timesync("CONT")
+        return 1
+    state.update({"dc": ip, "offset": state["offset"] + delta, "since": time.time(), "via": how})
+    with open(STATE, "w") as f:
+        json.dump(state, f)
+    print(f"clock set to {ip}'s time ({how}): {human(delta)}"
+          + (f", {human(state['offset'])} from normal time" if abs(state["offset"] - delta) > 0.5 else ""))
+    print("`dctime off` when you're done (a reboot also undoes it)")
+    return 0
+
+
+def off():
+    state = load()
+    if not state:
+        print("dctime is off: the clock is normal")
+        return 0
+    if not sudo("-v"):
+        return 1
+    if not set_clock(time.time() - state["offset"]):
+        return 1
+    timesync("CONT")
+    os.remove(STATE)
+    print(f"back to normal time ({human(-state['offset'])}); Parallels time sync resumed")
+    return 0
+
+
+def status():
+    state = load()
+    if not state:
+        print("dctime is off: the clock is normal")
+    else:
+        print(f"dctime is on: {state['dc']}'s time ({state.get('via', '?')}), "
+              f"{human(state['offset'])} from normal time")
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["off"]:
+        sys.exit(off())
+    if args in ([], ["status"]):
+        sys.exit(status())
+    if len(args) == 1 and re.fullmatch(r"[\w.\-:]+", args[0]) and not args[0].startswith("-"):
+        sys.exit(on(args[0]))
+    sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

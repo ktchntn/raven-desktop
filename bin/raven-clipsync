@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""raven-clipsync: Parallels clipboard sharing (Mac <-> VM) for Hyprland.
+
+Why: Parallels' clipboard helper (prlcp, run by the prlcc agent) is unusable on Hyprland as is:
+  - Wayland mode reads the clipboard only when it grabs focus on entering the VM (VM -> Mac breaks);
+  - X11 mode on Hyprland's XWayland fights Hyprland's XWM over the CLIPBOARD selection (the XWM
+    grabs it on every Wayland copy) and prlcp crashes, so Mac copies arrive late or never.
+
+So prlcc runs on a private headless X server (Xvfb, cookie-protected, nothing else connects) and
+this bridges that server's CLIPBOARD to Wayland:
+
+  Wayland -> X11   `wl-paste --watch` (data-control: sees every copy) re-publishes it with xclip
+  X11 -> Wayland   an XFixes selection watch (ctypes, no extra packages) re-publishes it with wl-copy
+
+prlcc is restarted if it exits. X11 apps on XWayland (VS Code...) keep Hyprland's own bridge.
+With RAVEN_CLIPSYNC_DISPLAY=:N it instead bridges an existing X display and does not start
+anything (the XWM guard below then matters: Hyprland's XWM windows share the client id of the
+root's _NET_SUPPORTING_WM_CHECK window; an XWM-owned CLIPBOARD is never copied to Wayland).
+
+Text and PNG images. A hash of the last synced content stops ping-pong.
+Debug: RAVEN_CLIPSYNC_DEBUG=1 logs to $XDG_RUNTIME_DIR/raven-clipsync.log.
+
+  raven-clipsync          run (one instance per session; autostarted from hyprland.lua)
+  raven-clipsync push-x   internal: called by wl-paste --watch
+"""
+import ctypes
+import fcntl
+import hashlib
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+RUN = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+STATE = os.path.join(RUN, "raven-clipsync.last")
+LOCK = os.path.join(RUN, "raven-clipsync.lock")
+MAX = 16 * 1024 * 1024
+TEXT_WL = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT")
+XAUTH = os.path.join(RUN, "raven-clipsync.xauth")
+DEBUG = os.environ.get("RAVEN_CLIPSYNC_DEBUG") == "1"
+CLIENT_SHIFT = 21    # X resource ids: client index in the bits above the 21-bit resource mask
+
+
+def log(*a):
+    if DEBUG:
+        with open(os.path.join(RUN, "raven-clipsync.log"), "a") as f:
+            print(time.strftime("%H:%M:%S"), os.getpid(), *a, file=f)
+
+
+class X:
+    """Just enough libX11 (ctypes) to ask who owns CLIPBOARD and to watch it change."""
+
+    def __init__(self):
+        self.x11 = x11 = ctypes.CDLL("libX11.so.6")
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XGetSelectionOwner.restype = ctypes.c_ulong
+        x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        x11.XFlush.argtypes = [ctypes.c_void_p]
+        x11.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long,
+                                           ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+                                           ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                                           ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                                           ctypes.POINTER(ctypes.c_void_p)]
+        x11.XFree.argtypes = [ctypes.c_void_p]
+        self.dpy = x11.XOpenDisplay(None)
+        if not self.dpy:
+            raise OSError("cannot open X display " + os.environ["DISPLAY"])
+        self.root = x11.XDefaultRootWindow(self.dpy)
+        self.clipboard = x11.XInternAtom(self.dpy, b"CLIPBOARD", 0)
+        self.wm_client = self.window_prop(b"_NET_SUPPORTING_WM_CHECK") >> CLIENT_SHIFT
+
+    def window_prop(self, name):
+        atom = self.x11.XInternAtom(self.dpy, name, 0)
+        typ, fmt, n, after, data = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+        self.x11.XGetWindowProperty(self.dpy, self.root, atom, 0, 1, 0, 33,  # XA_WINDOW
+                                    ctypes.byref(typ), ctypes.byref(fmt), ctypes.byref(n),
+                                    ctypes.byref(after), ctypes.byref(data))
+        if not data.value or n.value < 1:
+            return 0
+        value = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0]
+        self.x11.XFree(data)
+        return value
+
+    def owner(self):
+        return self.x11.XGetSelectionOwner(self.dpy, self.clipboard)
+
+    def is_wm(self, window):
+        return bool(self.wm_client) and window >> CLIENT_SHIFT == self.wm_client
+
+
+def digest(kind, data):
+    return kind + ":" + hashlib.sha256(data).hexdigest()
+
+
+def last():
+    try:
+        return open(STATE).read()
+    except OSError:
+        return ""
+
+
+def remember(h):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(h)
+    os.replace(tmp, STATE)
+
+
+def run(cmd, data=None, timeout=3):
+    try:
+        r = subprocess.run(cmd, input=data, capture_output=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def publish(cmd, data):
+    # xclip / wl-copy fork and keep serving the selection; don't wait on their output.
+    try:
+        subprocess.run(cmd, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def wayland_content():
+    types = (run(["wl-paste", "--list-types"]) or b"").decode(errors="replace").split("\n")
+    if any(t in types for t in TEXT_WL):
+        kind, data = "text", run(["wl-paste", "--no-newline", "--type", "text"])
+        target = "UTF8_STRING"
+    elif "image/png" in types:
+        kind, data = "png", run(["wl-paste", "--type", "image/png"])
+        target = "image/png"
+    else:
+        return None
+    if not data or len(data) > MAX:
+        return None
+    return kind, data, target
+
+
+def push_x(x=None, why="wayland changed"):
+    """Copy the Wayland selection to the X11 CLIPBOARD (unless X11 already has it from us)."""
+    got = wayland_content()
+    if not got:
+        return
+    kind, data, target = got
+    h = digest(kind, data)
+    x = x or X()
+    owner = x.owner()
+    if h == last() and owner and not x.is_wm(owner):
+        log("push-x: skip, X already serves it", hex(owner))
+        return
+    remember(h)
+    log("push-x:", why, kind, len(data), "owner was", hex(owner), "wm" if x.is_wm(owner) else "")
+    publish(["xclip", "-selection", "clipboard", "-t", target, "-i"], data)
+
+
+def pull_wayland():
+    """X11 CLIPBOARD owner changed: copy it to the Wayland selection."""
+    targets = (run(["xclip", "-o", "-selection", "clipboard", "-t", "TARGETS"]) or b"").decode(errors="replace").split()
+    if "UTF8_STRING" in targets or "STRING" in targets or "text/plain" in targets:
+        t = "UTF8_STRING" if "UTF8_STRING" in targets else "STRING" if "STRING" in targets else "text/plain"
+        kind, data, mime = "text", run(["xclip", "-o", "-selection", "clipboard", "-t", t]), "text/plain;charset=utf-8"
+    elif "image/png" in targets:
+        kind, data, mime = "png", run(["xclip", "-o", "-selection", "clipboard", "-t", "image/png"]), "image/png"
+    else:
+        return
+    if not data or len(data) > MAX:
+        return
+    h = digest(kind, data)
+    if h == last():
+        log("pull: same as last, skip")
+        return
+    remember(h)
+    log("pull: X11 -> Wayland", kind, len(data))
+    publish(["wl-copy", "--type", mime], data)
+
+
+def watch_x():
+    x = X()
+    xf = ctypes.CDLL("libXfixes.so.3")
+    xf.XFixesQueryExtension.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    xf.XFixesSelectSelectionInput.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    ev_base, err_base = ctypes.c_int(), ctypes.c_int()
+    if not xf.XFixesQueryExtension(x.dpy, ctypes.byref(ev_base), ctypes.byref(err_base)):
+        sys.exit("raven-clipsync: no XFixes")
+    # SetSelectionOwner | SelectionWindowDestroy | SelectionClientClose
+    xf.XFixesSelectSelectionInput(x.dpy, x.root, x.clipboard, 7)
+    x.x11.XFlush(x.dpy)
+    log("watching; wm client", hex(x.wm_client << CLIENT_SHIFT))
+    reclaims = []
+    event = ctypes.create_string_buffer(192)   # sizeof(XEvent)
+    while True:
+        x.x11.XNextEvent(x.dpy, event)
+        if ctypes.c_int.from_buffer(event).value != ev_base.value:   # XFixesSelectionNotify
+            continue
+        owner = ctypes.c_ulong.from_buffer(event, 48).value
+        if owner == 0 or x.is_wm(owner):
+            # Hyprland's XWM took it (or the owner went away): give X11 the real Wayland content.
+            now = time.monotonic()
+            reclaims = [t for t in reclaims if now - t < 3] + [now]
+            if len(reclaims) > 4:
+                log("reclaim: rate limited")
+                continue
+            time.sleep(0.1)
+            push_x(x, "reclaim from " + ("wm" if owner else "nobody"))
+        else:
+            time.sleep(0.05)
+            log("owner", hex(owner))
+            pull_wayland()
+
+
+def die_with_parent(sig=signal.SIGTERM):
+    # The child gets `sig` when the thread that started it (so raven-clipsync) dies (PR_SET_PDEATHSIG).
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, sig)
+
+
+def kill_with_parent():
+    die_with_parent(signal.SIGKILL)   # prlcc ignores SIGTERM
+
+
+def free_display():
+    """An X display number nothing uses: no socket file, lock file or abstract socket.
+    (Never let Xvfb pick: with -displayfd it took :0 from Hyprland's XWayland and unlinked its socket.)"""
+    try:
+        abstract = open("/proc/net/unix").read()
+    except OSError:
+        abstract = ""
+    for n in range(90, 200):
+        if (os.path.lexists(f"/tmp/.X11-unix/X{n}") or os.path.lexists(f"/tmp/.X{n}-lock")
+                or f"@/tmp/.X11-unix/X{n}\n" in abstract):
+            continue
+        return n
+    sys.exit("raven-clipsync: no free X display")
+
+
+def start_xvfb():
+    """A private headless X server for prlcc; returns (process, ':N')."""
+    cookie = subprocess.run(["mcookie"], capture_output=True, text=True, check=True).stdout.strip()
+    old = os.umask(0o077)
+    try:
+        open(XAUTH, "w").close()
+    finally:
+        os.umask(old)
+    display = f":{free_display()}"
+    subprocess.run(["xauth", "-f", XAUTH, "add", display, ".", cookie], check=True)
+    # Make the entry hostname-independent (FamilyWild, "ffff"): xauth files key cookies by hostname,
+    # and renaming the computer (Preferences > Apply) otherwise locks us out of our own server.
+    entries = subprocess.run(["xauth", "-f", XAUTH, "nlist"], capture_output=True, text=True, check=True).stdout
+    wild = "".join("ffff" + line[4:] + "\n" for line in entries.splitlines() if line)
+    subprocess.run(["xauth", "-f", XAUTH, "nmerge", "-"], input=wild, text=True, check=True)
+    xvfb = subprocess.Popen(["Xvfb", display, "-nolisten", "tcp", "-auth", XAUTH,
+                             "-screen", "0", "64x64x24", "-nocursor"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            preexec_fn=die_with_parent)
+    sock = f"/tmp/.X11-unix/X{display[1:]}"
+    for _ in range(100):
+        if os.path.exists(sock):
+            return xvfb, display
+        if xvfb.poll() is not None:
+            break
+        time.sleep(0.05)
+    sys.exit("raven-clipsync: Xvfb did not start on " + display)
+
+
+def supervise_prlcc():
+    env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
+    env["XDG_SESSION_TYPE"] = "x11"
+    while True:
+        started = time.monotonic()
+        log("starting prlcc on", env["DISPLAY"])
+        code = subprocess.run(["prlcc"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              preexec_fn=kill_with_parent).returncode
+        log("prlcc exited", code)
+        time.sleep(2 if time.monotonic() - started > 30 else 15)
+
+
+def main():
+    if sys.argv[1:] == ["push-x"]:
+        sys.stdin.buffer.read()   # drain what wl-paste --watch hands us; we pick the type ourselves
+        push_x()
+        return
+    if sys.argv[1:]:
+        sys.exit(__doc__)
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("raven-clipsync: already running")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    xvfb = None
+    if os.environ.get("RAVEN_CLIPSYNC_DISPLAY"):
+        os.environ["DISPLAY"] = os.environ["RAVEN_CLIPSYNC_DISPLAY"]
+    else:
+        xvfb, display = start_xvfb()
+        os.environ["DISPLAY"] = display
+        os.environ["XAUTHORITY"] = XAUTH
+        threading.Thread(target=supervise_prlcc, daemon=True).start()
+    try:
+        os.remove(STATE)   # a fresh X server holds nothing yet
+    except OSError:
+        pass
+    watcher = subprocess.Popen(["wl-paste", "--watch", os.path.abspath(__file__), "push-x"],
+                               preexec_fn=die_with_parent)
+    try:
+        push_x(why="startup")   # give the new X server the current clipboard
+        # The X11 watch blocks inside libX11, where signals can't reach Python: run it on a thread
+        # and keep the main thread free to handle SIGTERM (children then die with us).
+        threading.Thread(target=watch_x, daemon=True).start()
+        while True:
+            if xvfb is not None and xvfb.poll() is not None:
+                sys.exit("raven-clipsync: Xvfb exited")
+            if watcher.poll() is not None:
+                sys.exit("raven-clipsync: wl-paste --watch exited")
+            time.sleep(1)
+    finally:
+        watcher.terminate()
+        if xvfb is not None:
+            xvfb.terminate()
+
+
+if __name__ == "__main__":
+    main()

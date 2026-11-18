@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""raven-catch: tell me when something connects to one of my listeners.
+
+Watches the TCP listeners the RAVEN listeners card shows (raven-listeners' rule: real addresses,
+plus loopback only for tunnelling tools) and, once a second, the established connections to them.
+A new inbound connection from a non-loopback peer sends a critical notification, which the shell
+turns into the double lime frame sweep (Glyph) and the critical sound:
+
+    Connection on :4444        from 10.10.14.7 · nc
+
+Connections already open at startup are not announced; one alert per port + peer per minute.
+
+  raven-catch           run (one per session; autostarted from hyprland.lua)
+  RAVEN_CATCH_TEST=1    also announce loopback peers (for testing with 127.0.0.1)
+"""
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import time
+
+RUN = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+LOCK = os.path.join(RUN, "raven-catch.lock")
+TEST = os.environ.get("RAVEN_CATCH_TEST") == "1"
+QUIET_SECONDS = 60
+# Same as raven-listeners: loopback listeners only count for tunnelling / pivot tools.
+PIVOT = re.compile(r"^(ssh|chisel.*|ligolo.*|proxy|socat|sshuttle|ncat|nc|nc\..*|netcat|"
+                   r"msfconsole|msfrpcd|ruby|sliver.*|python3?(\.\d+)?|gost|frpc|frps|rpivot.*)$")
+PROC = re.compile(r'users:\(\("([^"]+)",pid=(\d+)')
+
+
+def split_addr(text):
+    addr, _, port = text.rpartition(":")
+    addr = addr.strip("[]").split("%")[0]
+    if addr.startswith("::ffff:"):
+        addr = addr[7:]
+    try:
+        return addr, int(port)
+    except ValueError:
+        return addr, -1
+
+
+def loopback(addr):
+    return addr.startswith("127.") or addr == "::1"
+
+
+def ss(*args):
+    try:
+        return subprocess.run(["ss", "-H", *args], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def listeners():
+    """{port: (addr, proc)} for the listeners the card shows."""
+    found = {}
+    for line in ss("-tlnp").splitlines():
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        addr, port = split_addr(cols[3])
+        m = PROC.search(line)
+        proc = m.group(1) if m else ""
+        if loopback(addr) and not PIVOT.match(proc):
+            continue
+        found[port] = ("all" if addr in ("0.0.0.0", "::", "*") else addr, proc)
+    return found
+
+
+def inbound(ports):
+    """{(port, peer, peer_port): proc} established connections to listening ports."""
+    conns = {}
+    for line in ss("-tnp", "state", "established").splitlines():
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        local, lport = split_addr(cols[2])
+        peer, pport = split_addr(cols[3])
+        if lport not in ports:
+            continue
+        laddr, proc = ports[lport]
+        if laddr != "all" and laddr != local:
+            continue
+        if loopback(peer) and not TEST:
+            continue
+        m = PROC.search(line)
+        conns[(lport, peer, pport)] = (m.group(1) if m else proc) or ""
+    return conns
+
+
+def announce(port, peer, proc):
+    body = f"from {peer}" + (f" · {proc}" if proc else "")
+    subprocess.run(["notify-send", "--urgency=critical", "--app-name=Listeners",
+                    "--hint=string:x-raven-tag:catch", f"Connection on :{port}", body],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    if sys.argv[1:]:
+        sys.exit(__doc__)
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("raven-catch: already running")
+    seen = set(inbound(listeners()))       # already open at startup: not news
+    quiet = {}                             # (port, peer) -> last alert time
+    while True:
+        time.sleep(1)
+        current = inbound(listeners())
+        now = time.monotonic()
+        for (port, peer, pport), proc in current.items():
+            if (port, peer, pport) in seen:
+                continue
+            if now - quiet.get((port, peer), -QUIET_SECONDS) >= QUIET_SECONDS:
+                quiet[(port, peer)] = now
+                announce(port, peer, proc)
+        seen = set(current)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+sink="@DEFAULT_AUDIO_SINK@"; snd="$HOME/.local/share/raven/sounds/volume.ogg"
+case "$1" in
+	up) wpctl set-mute "$sink" 0; wpctl set-volume -l 1 "$sink" 5%+; pw-play --volume 0.4 "$snd" & ;;
+	down) wpctl set-mute "$sink" 0; wpctl set-volume "$sink" 5%-; pw-play --volume 0.4 "$snd" & ;;
+	mute) wpctl set-mute "$sink" toggle ;;
+esac
+state="$(wpctl get-volume "$sink")"
+vol="$(awk '{printf "%d", $2 * 100 + 0.5}' <<< "$state")"
+muted=false; grep -q MUTED <<< "$state" && muted=true
+exec raven-ipc osd volume "$vol" "$muted" >/dev/null 2>&1

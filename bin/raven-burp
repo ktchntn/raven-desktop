@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""raven-burp: send both browsers through Burp (or not), live, from the shell's Burp tile.
+
+  raven-burp on | off | toggle   switch the system proxy (GNOME proxy settings) to/from
+                                 127.0.0.1:PORT for http and https
+  raven-burp status [--json]     proxy on/off, and whether anything listens on PORT (Burp)
+
+Firefox uses the system proxy by default (network.proxy.type 5) and Chromium does too when it
+thinks it's on GNOME (its launcher sets XDG_CURRENT_DESKTOP=Hyprland:GNOME); both follow a change
+without a restart. localhost / 127.0.0.0/8 / ::1 stay direct (ignore-hosts).
+PORT: ~/.config/raven/burp.json {"port": 8080}, default 8080.
+"""
+import json
+import os
+import subprocess
+import sys
+
+CONF = os.path.expanduser("~/.config/raven/burp.json")
+
+
+def port():
+    try:
+        return int(json.load(open(CONF)).get("port", 8080))
+    except (OSError, ValueError, TypeError):
+        return 8080
+
+
+def gs(*args):
+    r = subprocess.run(["gsettings", *args], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def proxy_on(p):
+    return (gs("get", "org.gnome.system.proxy", "mode") == "'manual'"
+            and gs("get", "org.gnome.system.proxy.http", "host") == "'127.0.0.1'"
+            and gs("get", "org.gnome.system.proxy.http", "port") == str(p))
+
+
+def listening(p):
+    out = subprocess.run(["ss", "-Htln", f"sport = :{p}"], capture_output=True, text=True).stdout
+    return bool(out.strip())
+
+
+def switch(on, p):
+    if on:
+        for scheme in ("http", "https"):
+            gs("set", f"org.gnome.system.proxy.{scheme}", "host", "127.0.0.1")
+            gs("set", f"org.gnome.system.proxy.{scheme}", "port", str(p))
+        gs("set", "org.gnome.system.proxy", "mode", "manual")
+    else:
+        gs("set", "org.gnome.system.proxy", "mode", "none")
+
+
+def main():
+    args = sys.argv[1:]
+    p = port()
+    if args in (["on"], ["off"], ["toggle"]):
+        on = (not proxy_on(p)) if args[0] == "toggle" else args[0] == "on"
+        switch(on, p)
+        args = ["status"]
+    if args and args[0] == "status":
+        state = {"proxy": proxy_on(p), "listening": listening(p), "port": p}
+        if "--json" in args:
+            print(json.dumps(state))
+        else:
+            print(f"proxy {'on' if state['proxy'] else 'off'} · 127.0.0.1:{p} "
+                  f"{'(Burp is listening)' if state['listening'] else '(nothing listening)'}")
+        return
+    sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

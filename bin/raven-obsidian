@@ -1,0 +1,26 @@
+#!/bin/sh
+# raven-obsidian (⌘⌥O): Obsidian as a drop-down. Every Obsidian window lives on the special
+# workspace "obsidian" (window rule in hyprland.lua: floating, centred), so this key slides it in
+# and out over whatever you are doing. Starts Obsidian first if it isn't running.
+CLASS=md.obsidian.Obsidian
+LOG=$HOME/.cache/raven/obsidian.log
+log() { mkdir -p "${LOG%/*}"; echo "$(date +%T) $*" >> "$LOG"; }
+running() { hyprctl clients -j | grep -q "\"class\": \"$CLASS\""; }
+# Obsidian's processes (the AppImage's mount), whether or not it has a window
+alive() { pgrep -f '/\.mount_Obsidi.*/obsidian' >/dev/null || pgrep -f 'Obsidian\.AppImage' >/dev/null; }
+if ! running; then
+    # Just quit? Its last processes can take a few seconds to exit, and a launch in that
+    # window is handed to the dying instance and lost. Wait for it to finish first.
+    i=0
+    while [ $i -lt 40 ] && alive; do sleep 0.25; i=$((i + 1)); done
+    alive && log "old instance still running after 10 s; launching anyway"
+    log "launching"
+    gtk-launch obsidian >>"$LOG" 2>&1 &
+    i=0
+    while [ $i -lt 60 ] && ! running; do sleep 0.25; i=$((i + 1)); done
+    running || { log "no window after 15 s"; exit 1; }
+    sleep 0.3
+    # it opened hidden on special:obsidian; show it unless it's already on screen
+    hyprctl monitors -j | grep -q '"name": "special:obsidian"' && exit 0
+fi
+exec hyprctl dispatch 'hl.dsp.workspace.toggle_special("obsidian")'

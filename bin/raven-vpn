@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""raven-vpn: one-click OpenVPN for the RAVEN shell, through NetworkManager (no sudo).
+
+  raven-vpn import FILE [NAME]   import an .ovpn as NetworkManager VPN NAME (default: file stem),
+                                 routes from the server only (never the default route), no autoconnect,
+                                 and make it the shell's profile. Re-importing NAME replaces it.
+  raven-vpn use NAME             make an existing NetworkManager VPN the shell's profile
+  raven-vpn status               JSON: {profile, state: up|connecting|down|none, manual, error}
+  raven-vpn up                   connect the profile (refuses while a manual `openvpn` runs:
+                                 the same certificate twice kicks both off the lab)
+  raven-vpn down                 disconnect the profile (marks it as wanted, so the shell's
+                                 "VPN dropped" alarm stays quiet)
+
+The profile name lives in ~/.config/raven/vpn.json. A tunnel started by hand (sudo openvpn)
+shows as "manual": the shell cannot stop it without root.
+"""
+import json
+import os
+import subprocess
+import sys
+
+CONF = os.path.expanduser("~/.config/raven/vpn.json")
+
+
+def nmcli(*args, check=True):
+    r = subprocess.run(["nmcli", *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        sys.exit((r.stderr or r.stdout).strip() or f"nmcli {args[0]} failed")
+    return r
+
+
+def profile():
+    try:
+        return json.load(open(CONF)).get("profile", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def save(name):
+    os.makedirs(os.path.dirname(CONF), exist_ok=True)
+    tmp = CONF + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"profile": name}, f)
+        f.write("\n")
+    os.replace(tmp, CONF)
+
+
+def vpn_names():
+    out = nmcli("-t", "-f", "NAME,TYPE", "connection", "show").stdout
+    return [l.rsplit(":", 1)[0].replace("\\:", ":") for l in out.splitlines() if l.endswith(":vpn")]
+
+
+def state(name):
+    out = nmcli("-t", "-f", "NAME,TYPE,STATE", "connection", "show", "--active").stdout
+    for line in out.splitlines():
+        parts = line.replace("\\:", "\0").split(":")
+        if len(parts) == 3 and parts[0].replace("\0", ":") == name and parts[1] == "vpn":
+            return "up" if parts[2] == "activated" else "connecting"
+    return "down"
+
+
+def manual():
+    """openvpn processes not started by NetworkManager's plugin."""
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            stat = open(f"/proc/{pid}/stat").read()
+        except OSError:
+            continue
+        comm = stat[stat.index("(") + 1:stat.rindex(")")]
+        if comm != "openvpn":
+            continue
+        ppid = stat[stat.rindex(")") + 2:].split()[1]
+        try:
+            parent = open(f"/proc/{ppid}/comm").read().strip()
+        except OSError:
+            parent = ""
+        if not parent.startswith("nm-openvpn"):
+            return True
+    return False
+
+
+def status(error=""):
+    name = profile()
+    st = "none"
+    if name:
+        st = state(name) if name in vpn_names() else "none"
+    return {"profile": name, "state": st, "manual": manual(), "error": error}
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "import" and len(sys.argv) in (3, 4):
+        path = os.path.abspath(os.path.expanduser(sys.argv[2]))
+        name = sys.argv[3] if len(sys.argv) == 4 else os.path.splitext(os.path.basename(path))[0]
+        if not os.path.isfile(path):
+            sys.exit(f"no such file: {path}")
+        if name in vpn_names():
+            if state(name) != "down":
+                sys.exit(f"{name} is connected; disconnect it before re-importing")
+            nmcli("connection", "delete", "id", name)
+        out = nmcli("connection", "import", "type", "openvpn", "file", path).stdout
+        # "Connection 'universal' (uuid) successfully added."
+        uuid = out[out.rindex("(") + 1:out.rindex(")")]
+        nmcli("connection", "modify", "uuid", uuid, "connection.id", name,
+              "connection.autoconnect", "no",
+              "ipv4.never-default", "yes", "ipv6.never-default", "yes")
+        # NetworkManager's importer drops ncp-ciphers (the old name of data-ciphers).
+        for line in open(path, errors="replace"):
+            words = line.split()
+            if len(words) == 2 and words[0] in ("ncp-ciphers", "data-ciphers"):
+                nmcli("connection", "modify", "uuid", uuid, "+vpn.data", "data-ciphers=" + words[1])
+        save(name)
+        print(json.dumps(status()))
+    elif cmd == "use" and len(sys.argv) == 3:
+        if sys.argv[2] not in vpn_names():
+            sys.exit(f"no NetworkManager VPN named {sys.argv[2]}")
+        save(sys.argv[2])
+        print(json.dumps(status()))
+    elif cmd == "status":
+        print(json.dumps(status()))
+    elif cmd == "up":
+        name = profile()
+        if not name:
+            print(json.dumps(status("No VPN profile: raven-vpn import FILE")))
+        elif manual():
+            print(json.dumps(status("A manual openvpn is running")))
+        else:
+            r = nmcli("--wait", "45", "connection", "up", "id", name, check=False)
+            err = "" if r.returncode == 0 else (r.stderr.strip().splitlines() or ["Connect failed"])[-1]
+            print(json.dumps(status(err.removeprefix("Error: ")[:120])))
+    elif cmd == "down":
+        name = profile()
+        if name and state(name) != "down":
+            # Asked for: tell the shell's drop alarm (services/Vpn.qml) not to go off.
+            run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+            open(os.path.join(run, "raven-vpn-down"), "w").close()
+            nmcli("connection", "down", "id", name, check=False)
+        print(json.dumps(status()))
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

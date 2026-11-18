@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Dot-matrix wallpapers via hyprpaper (upstream used awww).
+set -euo pipefail
+dir="$HOME/.local/share/raven/wallpapers"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/raven"
+default=night
+mapfile -t names < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+
+current() {
+	if [ -r "$state/wallpaper" ] && [ -d "$dir/$(cat "$state/wallpaper")" ]; then cat "$state/wallpaper"; else echo "$default"; fi
+}
+apply() {
+	local name="$1" output file
+	[ -d "$dir/$name" ] || { echo "raven-wallpaper: unknown wallpaper '$name'" >&2; exit 1; }
+	mkdir -p "$state"; echo "$name" > "$state/wallpaper"
+	ln -sfn "$dir/$name" "$state/wallpaper-current"
+	pgrep -x hyprpaper >/dev/null || { hyprpaper >/dev/null 2>&1 & sleep 0.6; }
+	for output in $(hyprctl -j monitors | jq -r '.[].name'); do
+		file="$dir/$name/$output.png"
+		[ -r "$file" ] || { raven-render-wallpapers >/dev/null 2>&1 || true; }
+		[ -r "$file" ] || file=$(ls "$dir/$name"/*.png | head -1)
+		hyprctl hyprpaper wallpaper "$output,$file,cover" >/dev/null
+		# The lock screen gets its own dimmed copy (hyprlock does not dim a plain image).
+		# Written to a temp file and moved into place: replaces the old entry, never writes through it.
+		magick "$file" -modulate 55 "$state/lock.png.new" && mv -f "$state/lock.png.new" "$state/lock.png"
+	done
+}
+step() {
+	local now i count=${#names[@]}; now="$(current)"
+	for i in "${!names[@]}"; do
+		if [ "${names[$i]}" = "$now" ]; then apply "${names[$(( (i + $1 + count) % count ))]}"; return; fi
+	done
+	apply "${names[0]}"
+}
+case "${1:-restore}" in
+	restore) apply "$(current)" ;;
+	next) step 1 ;; prev) step -1 ;;
+	set) apply "${2:?usage: raven-wallpaper set <name>}" ;;
+	list) printf '%s\n' "${names[@]}" ;;
+	current) current ;;
+	glass)
+		case "${2:-}" in
+			"") [ "$(cat "$state/glass" 2>/dev/null)" = on ] && echo on || echo off ;;
+			on|off) mkdir -p "$state"; echo "$2" > "$state/glass"; pkill -USR1 -x kitty || true ;;
+			*) echo "usage: raven-wallpaper glass [on|off]" >&2; exit 2 ;;
+		esac ;;
+	*) echo "usage: raven-wallpaper [restore|next|prev|set <name>|list|current|glass [on|off]]" >&2; exit 2 ;;
+esac

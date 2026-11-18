@@ -1,0 +1,23 @@
+# RAVEN: environment for the Hyprland (UWSM) session, read by uwsm before the compositor starts
+# and exported to systemd/D-Bus started apps too. Keep in step with the hl.env() lines at the top of
+# ~/.config/hypr/hyprland.lua (which still cover the plain Hyprland session).
+export QT_QPA_PLATFORM=wayland
+export QT_QPA_PLATFORMTHEME=qt6ct
+export QT_STYLE_OVERRIDE=Fusion
+export _JAVA_AWT_WM_NONREPARENTING=1
+# Warp natively on Wayland (repaint bug under XWayland)
+export WARP_ENABLE_WAYLAND=1
+export XCURSOR_THEME=Bibata-Modern-Classic
+export XCURSOR_SIZE=24
+export HYPRCURSOR_SIZE=24
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+# App entries hidden only in this session (XFCE-only tools)
+case ":${XDG_DATA_DIRS:-}:" in
+    *":$HOME/.local/share/raven/hyprland-only:"*) ;;
+    *) export XDG_DATA_DIRS="$HOME/.local/share/raven/hyprland-only:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" ;;
+esac
+# Personal additions (e.g. export TZ=Area/City), kept out of the repo
+[ -r "$HOME/.config/raven/env.local" ] && . "$HOME/.config/raven/env.local"
