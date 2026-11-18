@@ -2,8 +2,8 @@
 
 A Hyprland desktop for Kali Linux: black, NIHIL's greys, and `#C6FF00`.
 
-The desktop shell is [NIHIL](https://github.com/poligle/Nihil-Shell) by poligle (MIT), a
-Quickshell shell written for NixOS, ported to Kali and rebranded RAVEN. This repo holds
+The desktop shell is a remix of [NIHIL](https://github.com/poligle/Nihil-Shell) by poligle (MIT), a
+Quickshell shell written for NixOS, ported to Kali with some added hacker flavour. This repo holds
 everything layered on top: the port itself (`gen.py`), configs, themes and helper scripts.
 
 ![Desktop: clock, network and VPN cards (tun0, traffic, listeners) over a dot-matrix wallpaper](screenshots/01-desktop.png)
