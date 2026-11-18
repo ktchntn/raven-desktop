@@ -1,6 +1,6 @@
 # RAVEN
 
-A Hyprland desktop for Kali Linux: black, NIHIL's greys, and `#C6FF00`.
+A Hyprland desktop for Kali Linux: black, grey, and `#C6FF00`.
 
 The desktop shell is a remix of [NIHIL](https://github.com/poligle/Nihil-Shell) by poligle (MIT), a
 Quickshell shell written for NixOS, ported to Kali with some added hacker flavour. This repo holds
